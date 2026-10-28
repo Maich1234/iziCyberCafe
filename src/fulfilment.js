@@ -1,3 +1,4 @@
+import { enqueuePrint } from './printing.js';
 export function initializeFulfilment(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS deliveries(id INTEGER PRIMARY KEY,order_id INTEGER NOT NULL REFERENCES orders(id),file_id INTEGER UNIQUE NOT NULL REFERENCES order_files(id),note TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE INDEX IF NOT EXISTS deliveries_order ON deliveries(order_id);`);
@@ -22,14 +23,16 @@ export function fulfilment({db,action,body,surface,user,order,fail,value,audit,s
       audit(user.id,'order.delivered',id);
     } else {
       if (surface!=='customer') fail('Only the customer can review a delivery.',403);
-      const delivery=Number.isSafeInteger(body.delivery_id) && db.prepare("SELECT id FROM deliveries WHERE id=? AND order_id=? AND status='pending'").get(body.delivery_id,id);
+      const delivery=Number.isSafeInteger(body.delivery_id) && db.prepare("SELECT id,file_id FROM deliveries WHERE id=? AND order_id=? AND status='pending'").get(body.delivery_id,id);
       if (!delivery || current.status!=='awaiting_review') fail('This delivery is no longer awaiting review.',409);
       if (action==='request-revision') {
         const note=value(body.note,3000);
         db.prepare('INSERT INTO order_messages(order_id,sender,message) VALUES(?,?,?)').run(id,user.id,'Revision requested: '+note);
       }
+      if (action==='approve-delivery' && order.fulfilment_mode==='edit_and_print' && !db.prepare("SELECT id FROM order_files WHERE id=? AND type='application/pdf'").get(delivery.file_id)) fail('The final document must be a PDF before approving it for printing.',409);
       db.prepare('UPDATE deliveries SET status=? WHERE id=?').run(action==='approve-delivery'?'approved':'revision_requested',delivery.id);
       db.prepare('UPDATE orders SET status=? WHERE id=?').run(action==='approve-delivery'?'completed':'revision_requested',id);
+      if(action==='approve-delivery' && order.fulfilment_mode==='edit_and_print') enqueuePrint(db,id,delivery.file_id);
       audit(user.id,action==='approve-delivery'?'order.approved':'order.revision_requested',id);
     }
     db.exec('COMMIT');

@@ -1,3 +1,4 @@
+import { enqueuePrint } from './printing.js';
 import { randomUUID } from 'node:crypto';
 
 export function initializePayments(db) {
@@ -31,6 +32,7 @@ export function createPayments(db, provider, clock = Date.now) {
           db.prepare('INSERT INTO payments(order_id,attempt_id,amount,checkout,environment) VALUES(?,?,?,?,?)').run(order.id,id,attempt.amount,attempt.checkout,attempt.environment);
           db.prepare("UPDATE payment_attempts SET status='paid' WHERE id=?").run(id);
           db.prepare("UPDATE orders SET status='in_progress' WHERE id=?").run(order.id);
+          if (order.fulfilment_mode==='print') enqueuePrint(db,order.id);
           db.prepare("INSERT INTO audit(actor,action,target) VALUES(?,'order.payment_verified',?)").run(order.customer_id,order.id);
         }
         db.exec('COMMIT');

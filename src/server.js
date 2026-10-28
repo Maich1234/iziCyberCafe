@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { initializePrinting, PRINT_MODES, printerRoutes, printAgentRoutes } from './printing.js';
 import { receiptDownload } from './receipts.js';
 import { createMpesa } from './mpesa.js';
 import { initializePayments, createPayments } from './payments.js';
@@ -21,6 +22,7 @@ export function createPlatform({ database = ':memory:', paymentProvider = null, 
   initializeWorkspace(db);
   initializePayments(db);
   initializeFulfilment(db);
+  initializePrinting(db);
   const payments=createPayments(db,paymentProvider,paymentClock);
   const hash = password => { const salt = randomBytes(16).toString('hex'); return salt + ':' + scryptSync(password, salt, 64).toString('hex'); };
   const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
@@ -49,7 +51,7 @@ export function createPlatform({ database = ':memory:', paymentProvider = null, 
         const path = new URL(req.url, 'http://localhost').pathname;
         if (!path.startsWith('/api/')) {
           if (req.method !== 'GET') fail('Method not allowed', 405);
-          const assets = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/receipt-printer.js': ['receipt-printer.js','text/javascript'], '/style.css': ['style.css', 'text/css'] };
+          const assets = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/printing.js':['printing.js','text/javascript'], '/receipt-printer.js': ['receipt-printer.js','text/javascript'], '/style.css': ['style.css', 'text/css'] };
           if (!assets[path]) fail('Not found', 404);
           let body = readFileSync(new URL('../public/' + assets[path][0], import.meta.url), 'utf8').replaceAll('__SURFACE__', surface);
           res.writeHead(200, { 'Content-Type': assets[path][1] }); return res.end(body);
@@ -69,6 +71,7 @@ export function createPlatform({ database = ':memory:', paymentProvider = null, 
         const user = token && db.prepare('SELECT users.id,email,role FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>?').get(token, Date.now());
         const role = surface === 'cafe' ? 'cafe' : surface;
         const cookie = t => `${cookieName}=${t}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${t ? 28800 : 0}${process.env.SECURE_COOKIES === '1' ? '; Secure' : ''}`;
+        if (printAgentRoutes({db,path,req,res,body,surface,fail,send})) return;
         if (path.startsWith('/api/payments/mpesa/callback/')) {if (!await payments.route({path,req,body,surface,user,fail,send})) fail('Not found',404);return;}
         if (path === '/api/session' && req.method === 'GET') return send({ surface, user: user?.role === role ? user : null });
         if (path === '/api/register' && req.method === 'POST') {
@@ -115,14 +118,16 @@ export function createPlatform({ database = ':memory:', paymentProvider = null, 
           const cafe = db.prepare("SELECT id FROM cafes WHERE owner_id=? AND status='approved'").get(user.id);
           if (!cafe) fail('Your café must be approved before publishing services.', 403);
           if (!Number.isSafeInteger(body.price) || body.price < 1 || body.price > 10000000) fail('Enter a valid price in whole Kenya shillings.');
-          db.prepare('INSERT INTO services(cafe_id,name,price) VALUES(?,?,?)').run(cafe.id, value(body.name), body.price); return send({ ok: true }, 201);
+          const mode=body.fulfilment_mode||'digital';if(!PRINT_MODES.includes(mode)) fail('Choose a valid service fulfilment type.');
+          db.prepare('INSERT INTO services(cafe_id,name,price,fulfilment_mode) VALUES(?,?,?,?)').run(cafe.id, value(body.name), body.price,mode); return send({ ok: true }, 201);
         }
         if (path === '/api/orders' && req.method === 'POST' && surface === 'customer') {
           const service = db.prepare("SELECT services.* FROM services JOIN cafes ON cafes.id=services.cafe_id WHERE services.id=? AND cafes.status='approved'").get(body.service_id);
           if (!service) fail('Service is unavailable', 404);
-          const result = db.prepare('INSERT INTO orders(customer_id,cafe_id,service_id,instructions,price) VALUES(?,?,?,?,?)').run(user.id, service.cafe_id, service.id, value(body.instructions, 5000), service.price);
+          const result = db.prepare('INSERT INTO orders(customer_id,cafe_id,service_id,instructions,price,fulfilment_mode) VALUES(?,?,?,?,?,?)').run(user.id, service.cafe_id, service.id, value(body.instructions, 5000), service.price,service.fulfilment_mode);
           return send({ id: Number(result.lastInsertRowid) }, 201);
         }
+        if (printerRoutes({db,path,req,body,surface,user,fail,value,send,audit})) return;
         if (receiptDownload({db,path,req,res,user,surface,fail})) return;
         if (await payments.route({path,req,body,surface,user,fail,send})) return;
         if (orderWorkspace({ payments, db, req, res, path, body, user, surface, send, fail, value, audit })) return;

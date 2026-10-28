@@ -44,9 +44,9 @@ npm run check
 
 ## Scope and next milestones
 
-This is an executable foundation, not a payment-ready marketplace. Orders progress through `requested`, `quoted`, `awaiting_payment`, `in_progress`, `awaiting_review`, and `completed`, with a `revision_requested` loop. Only a correlated provider status query can create a verified payment record. No real payment has been exercised in this repository, and physical printing is not connected. Refunds, payouts and printer agents remain to implement. Café-owned uploads can be submitted as final deliveries only after verified payment; the customer approves the exact pending version or requests a revision.
+This is an executable foundation, not a payment-ready marketplace. Orders progress through `requested`, `quoted`, `awaiting_payment`, `in_progress`, `awaiting_review`, and `completed`, with a `revision_requested` loop. Only a correlated provider status query can create a verified payment record. No real payment has been exercised in this repository, and physical printing is not connected. Refunds and payouts remain to implement. A CUPS printer bridge and durable queue are included below, pending physical acceptance testing. Café-owned uploads can be submitted as final deliveries only after verified payment; the customer approves the exact pending version or requests a revision.
 
-Next: run the configured Daraja sandbox acceptance flow, then add a durable print queue and shop-side agent. Only paid, approved final files may become print jobs. An uncertain or interrupted printer job must require reconciliation before retrying.
+Next: run the configured Daraja sandbox acceptance flow and the physical CUPS printer acceptance flow. Only paid, approved final files may become print jobs. An uncertain or interrupted printer job must require reconciliation before retrying.
 
 ## Deployment boundary
 
@@ -78,7 +78,7 @@ After verification, the assigned café can submit one of its own order files wit
 
 ### Validation
 
-`npm test` exercises mocked transport and provider responses only; it makes no real charges. It covers payment gating, callback spoofing, amount ownership, duplicate initiation/verification, uncertain responses, failed retries, participant authorization, delivery revisions, stale approvals and persistent ledger records. Browser interaction validation is still outstanding because a Chromium download was unavailable in the development environment.
+`npm test` exercises mocked transport and provider responses only; it makes no real charges. It covers payment gating, callback spoofing, amount ownership, duplicate initiation/verification, uncertain responses, failed retries, participant authorization, delivery revisions, stale approvals and persistent ledger records. Browser interaction validation is still outstanding in this development environment.
 
 Before enabling real payments, run a separate sandbox deployment to test STK prompts, successful/cancelled/expired payments, delayed or missing callbacks, query recovery and merchant statement reconciliation. Add scheduled reconciliation, operational recovery, backups, retention controls and merchant payout/refund handling before a production launch.
 
@@ -93,3 +93,43 @@ The first display feeds the paper once per receipt in the page session. Replay o
 **Download receipt** returns an authenticated text attachment at `/api/orders/:id/receipt`. Only the customer who owns the paid order can download it. Pending orders have no receipt, and another customer or café cannot download it. The download uses `Cache-Control: no-store` and the same verified ledger amount/reference as the on-screen receipt. It is a payment record, not a tax invoice.
 
 Validation includes receipt state gating, safe HTML escaping, Nairobi time formatting, ledger-owned totals and download authorization. Local visual preview could not be opened by the cloud browser (`ERR_CONNECTION_REFUSED`), so browser animation and responsive visual QA remain pending.
+
+## Print fulfilment and shop-side agent
+
+Services now declare **Digital delivery**, **Print as uploaded**, or **Edit, approve & print**. Existing services/orders migrate to digital delivery. New orders copy the service's mode; clients cannot override it.
+
+For either print mode, the customer uploads the source document and saves copies (1–100), A4/Letter, monochrome/colour and single-sided/long-edge duplex instructions before the café quotes. Print-only orders require a customer-owned PDF. All pages are printed; page ranges and automatic per-page pricing are not implemented. The café's quote covers the whole document and every requested copy. Settings freeze when that quote is sent, so payment always covers the agreed job.
+
+A verified print-only payment creates one durable queue record in the same transaction as the payment ledger. Editing orders remain in progress until the customer approves the exact final PDF delivery; approval queues that PDF atomically. An unpaid order, unapproved revision or non-PDF final cannot enter the queue. The on-screen receipt animation continues to represent payment only.
+
+### Café printer controls
+
+The café workspace includes printer registration, sandbox/live separation, colour/duplex capabilities, pause/resume, agent-token rotation and the print queue. Agent tokens are shown once and stored only as hashes on the server. Each token belongs to one printer at one café. A compatible printer can claim only its own café's jobs, and sandbox jobs cannot be claimed by a live printer. No printer connected yet simply leaves eligible work queued.
+
+The statuses have distinct meanings:
+
+| Job status | Meaning |
+| --- | --- |
+| queued | Eligible and waiting for a compatible agent |
+| claimed | Issued to one agent; it may already be submitting locally |
+| spooled | CUPS accepted the job; physical output is not yet confirmed |
+| uncertain | The submission result needs staff investigation |
+| ready | Staff confirmed every requested page and copy physically printed |
+| collected | Staff recorded customer collection; order is complete |
+
+There are no automatic claim expirations or automatic retries. Interrupted claims remain blocked. Stop the old agent, inspect the physical output and cancel/resolve the old local spool job before explicitly choosing **Resolve & retry**. The API requires an acknowledgement and staff note; retry invalidates the old claim token. Late file requests/reports from that claim are rejected. Already downloaded or submitted work cannot be remotely recalled by pausing or rotating a token; resolve it at the shop computer first. **Confirm ready** requires a separate physical-output acknowledgement.
+
+### Run the agent on a shop computer
+
+The initial adapter targets CUPS on Linux/macOS, using the [official `lp` command](https://www.cups.org/doc/man-lp.html) and [documented printing options](https://www.cups.org/doc/options.html). A native Windows bridge is not included. Confirm the installed printer/driver honours colour, paper and duplex settings before enabling it.
+
+1. Configure and test the local CUPS printer outside the app.
+2. Register the printer in the café workspace and save its one-time token securely.
+3. Export the variables in `agent/.env.example` on the shop computer. Use the café workspace's HTTPS origin, the local CUPS destination and the matching sandbox/live payment environment. Environment files are not loaded automatically.
+4. Keep `PRINT_ENABLE=0` until the shop is ready. Set it to `1` to permit real spool submissions.
+5. Run `npm run print-agent -- --once` for one poll, or `npm run print-agent` for polling every five seconds. These commands submit to the actual configured printer when enabled; they are not simulations.
+6. Verify the paper at the printer, mark the job ready, and record collection from the café dashboard.
+
+The agent downloads only its currently claimed PDF, checks its SHA-256 digest, writes a private temporary file, and fsyncs a local journal entry before invoking `lp` without a shell. Temporary document files are removed when the attempt returns. A process crash may leave a temporary directory requiring local cleanup. A submission error, unexpected spool response or failed report never triggers another `lp` invocation for that claim. Journals contain job/attempt identifiers rather than document contents or credentials. They are a local duplicate-submission guard, not proof of physical printing.
+
+The first version still needs physical printer acceptance testing, malware-scanning integration, production credential lifecycle work, and browser visual QA. Tests mock spool submission and never print paper. It is not an exactly-once physical printing guarantee: uncertain outcomes require the staff reconciliation described above.
