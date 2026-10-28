@@ -9,11 +9,11 @@ import { cupsArguments, runOnce } from '../agent/print-agent.js';
 
 async function fixture(t,mode='print') {
   let sequence=0;
-  const app=createPlatform({paymentProvider:{environment:'sandbox',async initiate(){sequence++;return {checkout:'checkout-'+sequence,merchant:'merchant-'+sequence};},async query(){return 'paid';}}});
-  app.provisionAdmin('admin@example.test','password-for-testing');
+  const app=await createPlatform({paymentProvider:{environment:'sandbox',async initiate(){sequence++;return {checkout:'checkout-'+sequence,merchant:'merchant-'+sequence};},async query(){return 'paid';}}});
+  await app.provisionAdmin('admin@example.test','password-for-testing');
   const servers={},cookies={};
   for(const role of ['customer','cafe','admin']) {const server=http.createServer(app.handler(role));await new Promise(r=>server.listen(0,'127.0.0.1',r));servers[role]=server;}
-  t.after(async()=>{await Promise.all(Object.values(servers).map(s=>new Promise(r=>s.close(r))));app.close();});
+  t.after(async()=>{await Promise.all(Object.values(servers).map(s=>new Promise(r=>s.close(r))));await app.close();});
   const origin=role=>`http://127.0.0.1:${servers[role].address().port}`;
   async function call(role,path,body,cookie=cookies[role]) {
     const res=await fetch(origin(role)+'/api/'+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...(cookie?{Cookie:cookie}:{})},...(body===undefined?{}:{body:JSON.stringify(body)})});

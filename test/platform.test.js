@@ -4,14 +4,14 @@ import http from 'node:http';
 import { createPlatform } from '../src/server.js';
 
 test('registration, approval, catalog and tenant-isolated order flow', async t => {
-  const app = createPlatform();
-  app.provisionAdmin('admin@example.test', 'admin-test-password');
+  const app = await createPlatform();
+  await app.provisionAdmin('admin@example.test', 'admin-test-password');
   const servers = {};
   for (const role of ['admin','cafe','customer']) {
     const server = http.createServer(app.handler(role));
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); servers[role] = server;
   }
-  t.after(async () => { await Promise.all(Object.values(servers).map(s => new Promise(r => s.close(r)))); app.close(); });
+  t.after(async () => { await Promise.all(Object.values(servers).map(s => new Promise(r => s.close(r)))); await app.close(); });
   async function call(role, path, body, cookie) {
     const res = await fetch(`http://127.0.0.1:${servers[role].address().port}/api/${path}`, { method: body === undefined ? 'GET':'POST', headers: {'Content-Type':'application/json', ...(cookie ? {Cookie:cookie}: {})}, ...(body===undefined?{}:{body:JSON.stringify(body)}) });
     return { status:res.status, cookie:res.headers.get('set-cookie')?.split(';')[0], data:await res.json() };

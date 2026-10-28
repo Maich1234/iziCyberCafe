@@ -15,8 +15,8 @@ async function fixture(t,{uncertain=false,providerEnabled=true}={}) {
   const database=join(directory,'test.sqlite');
   const calls=[];
   const provider={environment:'sandbox',async initiate(data){initiated++;calls.push(data);if(uncertain) throw Error('network timeout');return {checkout:'checkout-'+initiated,merchant:'merchant-'+initiated};},async query(){queries++;if(outcome==='unreachable')throw Error('network down');return outcome;}};
-  const platform=createPlatform({database,paymentProvider:providerEnabled?provider:null,paymentClock:()=>time});
-  platform.provisionAdmin('admin@example.test','test-password-123');
+  const platform=await createPlatform({database,paymentProvider:providerEnabled?provider:null,paymentClock:()=>time});
+  await platform.provisionAdmin('admin@example.test','test-password-123');
   const servers={};
   for(const role of ['customer','cafe','admin']) {const server=http.createServer(platform.handler(role));await new Promise(r=>server.listen(0,'127.0.0.1',r));servers[role]=server;}
   const origin=role=>`http://127.0.0.1:${servers[role].address().port}`;
@@ -37,7 +37,7 @@ async function fixture(t,{uncertain=false,providerEnabled=true}={}) {
   const check=()=>{time+=11000;return call('customer','orders/1/payment/check',{});};
   const detail=async()=>(await call('customer','orders/1')).data;
   const callback=(event={},pathId=calls[0]?.id)=>call('customer','payments/mpesa/callback/'+pathId,{Body:{stkCallback:{CheckoutRequestID:'checkout-1',MerchantRequestID:'merchant-1',ResultCode:0,...event}}},{Origin:'https://provider.example'});
-  t.after(async()=>{await Promise.all(Object.values(servers).map(s=>new Promise(r=>s.close(r))));platform.close();rmSync(directory,{recursive:true,force:true});});
+  t.after(async()=>{await Promise.all(Object.values(servers).map(s=>new Promise(r=>s.close(r))));await platform.close();rmSync(directory,{recursive:true,force:true});});
   return {raw:(role,path)=>fetch(origin(role)+'/api/'+path,{headers:{Cookie:cookies[role]||''}}),call,start,check,detail,callback,calls,setOutcome:v=>{outcome=v;},get queries(){return queries;},get initiated(){return initiated;},database};
 }
 
@@ -93,7 +93,7 @@ test('verified payment unlocks versioned delivery, revision and final customer a
   assert.equal(persisted.prepare('SELECT count(*) AS n FROM payments').get().n,1);
   assert.equal(persisted.prepare('SELECT amount FROM payments').get().amount,700);
   assert.equal(persisted.prepare('SELECT count(*) AS n FROM deliveries').get().n,2);
-  assert.throws(()=>createPayments(persisted,{environment:'live'}),/separate databases/);
+  await assert.rejects(createPayments(persisted,{environment:'live'}),/separate databases/);
   assert.equal(persisted.prepare('PRAGMA integrity_check').get().integrity_check,'ok');persisted.close();
 });
 test('unconfigured payments fail closed without initiating a charge',async t=>{

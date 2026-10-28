@@ -30,7 +30,7 @@ export async function runOnce(config, {request=fetch, submit=async(args)=>execut
   try {
     if(job.environment!==config.PRINT_PAYMENT_ENV) throw Error('The job payment environment does not match this agent.');
     const bytes=Buffer.from(await (await call(`/api/print-agent/jobs/${job.id}/file`,undefined,job.claim_token)).arrayBuffer());
-    if(bytes.length>5*1024*1024 || bytes.subarray(0,5).toString()!=='%PDF-' || createHash('sha256').update(bytes).digest('hex')!==job.sha256) throw Error('The print file failed integrity checks.');
+    if(bytes.length>3*1024*1024 || bytes.subarray(0,5).toString()!=='%PDF-' || createHash('sha256').update(bytes).digest('hex')!==job.sha256) throw Error('The print file failed integrity checks.');
     directory=mkdtempSync(join(tmpdir(),'izi-print-'));
     const file=join(directory,'document.pdf');writeFileSync(file,bytes,{mode:0o600});
     const args=cupsArguments(config.PRINT_CUPS_PRINTER||'',job,file);
