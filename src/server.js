@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { initializeWorkspace, orderWorkspace, MAX_FILE_BYTES } from './order-workspace.js';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { readFileSync, mkdirSync } from 'node:fs';
@@ -13,6 +14,7 @@ export function createPlatform({ database = ':memory:' } = {}) {
     CREATE TABLE IF NOT EXISTS services(id INTEGER PRIMARY KEY,cafe_id INTEGER REFERENCES cafes(id),name TEXT NOT NULL,price INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY,customer_id INTEGER REFERENCES users(id),cafe_id INTEGER REFERENCES cafes(id),service_id INTEGER REFERENCES services(id),instructions TEXT NOT NULL,price INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'requested',created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,actor INTEGER REFERENCES users(id),action TEXT NOT NULL,target INTEGER,created TEXT DEFAULT CURRENT_TIMESTAMP);`);
+  initializeWorkspace(db);
   const hash = password => { const salt = randomBytes(16).toString('hex'); return salt + ':' + scryptSync(password, salt, 64).toString('hex'); };
   const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
   const value = (v, max = 200) => { if (typeof v !== 'string' || !v.trim() || v.trim().length > max) fail('Please check the required fields.'); return v.trim(); };
@@ -51,7 +53,7 @@ export function createPlatform({ database = ':memory:' } = {}) {
           if (!req.headers['content-type']?.startsWith('application/json')) fail('JSON required', 415);
           if (req.headers.origin && req.headers.origin !== `${process.env.SECURE_COOKIES === '1' ? 'https' : 'http'}://${req.headers.host}`) fail('Invalid origin', 403);
           const chunks = []; let size = 0;
-          for await (const chunk of req) { size += chunk.length; if (size > 20000) fail('Request too large', 413); chunks.push(chunk); }
+          for await (const chunk of req) { size += chunk.length; if (size > ( /^\/api\/orders\/[1-9]\d*\/files$/.test(path) ? Math.ceil(MAX_FILE_BYTES * 4 / 3) + 2000 : 20000)) fail('Request too large', 413); chunks.push(chunk); }
           try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { fail('Invalid JSON'); }
           if (!body || Array.isArray(body) || typeof body !== 'object') fail('Invalid request');
         }
@@ -113,6 +115,7 @@ export function createPlatform({ database = ':memory:' } = {}) {
           const result = db.prepare('INSERT INTO orders(customer_id,cafe_id,service_id,instructions,price) VALUES(?,?,?,?,?)').run(user.id, service.cafe_id, service.id, value(body.instructions, 5000), service.price);
           return send({ id: Number(result.lastInsertRowid) }, 201);
         }
+        if (orderWorkspace({ db, req, res, path, body, user, surface, send, fail, value, audit })) return;
         // Payment-dependent transitions deliberately remain disabled until verified payment integration.
         fail('Not found', 404);
       } catch (e) { if (!e.status) console.error(e); send({ error: e.status ? e.message : 'Something went wrong. Please retry.' }, e.status || 500); }
