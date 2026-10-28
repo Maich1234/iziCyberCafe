@@ -91,7 +91,7 @@ export function createPayments(db, provider, clock = Date.now) {
   }
   function summary(orderId) {
     const attempt=db.prepare('SELECT status,environment,created FROM payment_attempts WHERE order_id=? ORDER BY rowid DESC LIMIT 1').get(orderId);
-    const payment=db.prepare('SELECT amount,environment,created FROM payments WHERE order_id=?').get(orderId);
+    const payment=db.prepare('SELECT id,amount,environment,created FROM payments WHERE order_id=?').get(orderId);
     return {enabled:!!provider,environment:provider?.environment,attempt:attempt||null,verified:payment||null};
   }
   return {route,summary};

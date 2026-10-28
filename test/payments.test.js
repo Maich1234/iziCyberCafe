@@ -38,12 +38,13 @@ async function fixture(t,{uncertain=false,providerEnabled=true}={}) {
   const detail=async()=>(await call('customer','orders/1')).data;
   const callback=(event={},pathId=calls[0]?.id)=>call('customer','payments/mpesa/callback/'+pathId,{Body:{stkCallback:{CheckoutRequestID:'checkout-1',MerchantRequestID:'merchant-1',ResultCode:0,...event}}},{Origin:'https://provider.example'});
   t.after(async()=>{await Promise.all(Object.values(servers).map(s=>new Promise(r=>s.close(r))));platform.close();rmSync(directory,{recursive:true,force:true});});
-  return {call,start,check,detail,callback,calls,setOutcome:v=>{outcome=v;},get queries(){return queries;},get initiated(){return initiated;},database};
+  return {raw:(role,path)=>fetch(origin(role)+'/api/'+path,{headers:{Cookie:cookies[role]||''}}),call,start,check,detail,callback,calls,setOutcome:v=>{outcome=v;},get queries(){return queries;},get initiated(){return initiated;},database};
 }
 
 test('verified payment unlocks versioned delivery, revision and final customer approval',async t=>{
   const f=await fixture(t);
   assert.equal((await f.call('cafe','orders/1/deliver',{file_id:1,note:'Done'})).status,409);
+  assert.equal((await f.raw('customer','orders/1/receipt')).status,409);
   assert.equal((await f.start()).status,202);
   assert.equal(f.calls[0].amount,700);assert.equal(f.calls[0].phone,'254712345678');
   assert.equal((await f.start()).status,409);assert.equal(f.initiated,1);
@@ -54,6 +55,15 @@ test('verified payment unlocks versioned delivery, revision and final customer a
   f.setOutcome('paid');await f.check();
   assert.equal((await f.detail()).order.status,'in_progress');
   assert.equal((await f.detail()).payment.verified.amount,700);
+  assert.equal((await f.detail()).payment.verified.id,1);
+  const download=await f.raw('customer','orders/1/receipt');
+  assert.equal(download.status,200);
+  assert.equal(download.headers.get('cache-control'),'no-store');
+  assert.match(download.headers.get('content-disposition'),/IZI-PAY-000001.txt/);
+  const text=await download.text();
+  assert.match(text,/IZI-PAY-000001/);assert.match(text,/700/);assert.match(text,/SANDBOX TEST RECEIPT/);
+  assert.equal((await f.raw('cafe','orders/1/receipt')).status,404);
+  assert.equal((await f.raw('admin','orders/1/receipt')).status,404);
   await Promise.all([f.callback(),f.callback(),f.check()]);
   const adminSummary=await f.call('admin','payments/review');
   assert.equal(adminSummary.data.attempts[0].phone,'••••5678');
@@ -112,6 +122,7 @@ test('payment routes reject another customer and cross-site initiation',async t=
   assert.equal((await f.call('customer','orders/1/payment',{phone:'0712345678'},{Origin:'https://evil.example'})).status,403);
   await f.call('customer','register',{email:'other@example.test',password:'test-password-123'});
   await f.call('customer','login',{email:'other@example.test',password:'test-password-123'});
+  assert.equal((await f.raw('customer','orders/1/receipt')).status,404);
   assert.equal((await f.start()).status,404);assert.equal((await f.check()).status,404);assert.equal(f.initiated,0);
 });
 

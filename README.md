@@ -81,3 +81,15 @@ After verification, the assigned café can submit one of its own order files wit
 `npm test` exercises mocked transport and provider responses only; it makes no real charges. It covers payment gating, callback spoofing, amount ownership, duplicate initiation/verification, uncertain responses, failed retries, participant authorization, delivery revisions, stale approvals and persistent ledger records. Browser interaction validation is still outstanding because a Chromium download was unavailable in the development environment.
 
 Before enabling real payments, run a separate sandbox deployment to test STK prompts, successful/cancelled/expired payments, delayed or missing callbacks, query recovery and merchant statement reconciliation. Add scheduled reconciliation, operational recovery, backups, retention controls and merchant payout/refund handling before a production launch.
+
+## Customer receipt animation
+
+Customer payment confirmation includes an original, dependency-free printer-and-paper animation inspired by the supplied [dqnamo receipt-printer experiment](https://www.dqnamo.com/experiments/receipt-printer). The charcoal housing, stepped paper feed, thermal-style typography and perforated paper are implemented locally; no third-party scripts, textures or payment information are sent to the reference site.
+
+Pending, failed and uncertain payments never show paid paper or a download. Once a verified ledger record exists, the paper shows the service, café, ledger amount, stable platform receipt reference, order reference and verification time in Africa/Nairobi. Sandbox receipts are labelled as tests with no real payment. The platform reference is explicitly distinguished from the customer's M-Pesa SMS receipt number, and receipt preparation does not imply order fulfilment or physical document printing.
+
+The first display feeds the paper once per receipt in the page session. Replay only repeats the visual animation; it never initiates or checks a payment. Reopening or refreshing an order retains its verified receipt. Reduced-motion preferences show the paper immediately, and animation listeners are cleaned up when the order closes. Receipt totals remain readable and downloadable without animation support.
+
+**Download receipt** returns an authenticated text attachment at `/api/orders/:id/receipt`. Only the customer who owns the paid order can download it. Pending orders have no receipt, and another customer or café cannot download it. The download uses `Cache-Control: no-store` and the same verified ledger amount/reference as the on-screen receipt. It is a payment record, not a tax invoice.
+
+Validation includes receipt state gating, safe HTML escaping, Nairobi time formatting, ledger-owned totals and download authorization. Local visual preview could not be opened by the cloud browser (`ERR_CONNECTION_REFUSED`), so browser animation and responsive visual QA remain pending.

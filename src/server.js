@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { receiptDownload } from './receipts.js';
 import { createMpesa } from './mpesa.js';
 import { initializePayments, createPayments } from './payments.js';
 import { initializeFulfilment } from './fulfilment.js';
@@ -48,7 +49,7 @@ export function createPlatform({ database = ':memory:', paymentProvider = null, 
         const path = new URL(req.url, 'http://localhost').pathname;
         if (!path.startsWith('/api/')) {
           if (req.method !== 'GET') fail('Method not allowed', 405);
-          const assets = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'] };
+          const assets = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/receipt-printer.js': ['receipt-printer.js','text/javascript'], '/style.css': ['style.css', 'text/css'] };
           if (!assets[path]) fail('Not found', 404);
           let body = readFileSync(new URL('../public/' + assets[path][0], import.meta.url), 'utf8').replaceAll('__SURFACE__', surface);
           res.writeHead(200, { 'Content-Type': assets[path][1] }); return res.end(body);
@@ -122,6 +123,7 @@ export function createPlatform({ database = ':memory:', paymentProvider = null, 
           const result = db.prepare('INSERT INTO orders(customer_id,cafe_id,service_id,instructions,price) VALUES(?,?,?,?,?)').run(user.id, service.cafe_id, service.id, value(body.instructions, 5000), service.price);
           return send({ id: Number(result.lastInsertRowid) }, 201);
         }
+        if (receiptDownload({db,path,req,res,user,surface,fail})) return;
         if (await payments.route({path,req,body,surface,user,fail,send})) return;
         if (orderWorkspace({ payments, db, req, res, path, body, user, surface, send, fail, value, audit })) return;
         // Payment-dependent transitions deliberately remain disabled until verified payment integration.
