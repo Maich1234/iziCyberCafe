@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { fulfilment } from './fulfilment.js';
 
 export const MAX_FILE_BYTES = 5 * 1024 * 1024;
 export function initializeWorkspace(db) {
@@ -10,8 +11,8 @@ export function initializeWorkspace(db) {
     CREATE INDEX IF NOT EXISTS quotes_order ON quotes(order_id);
     CREATE UNIQUE INDEX IF NOT EXISTS one_pending_quote ON quotes(order_id) WHERE status='pending';`);
 }
-export function orderWorkspace({ db, req, res, path, body, user, surface, send, fail, value, audit }) {
-  const match = path.match(/^\/api\/orders\/([1-9]\d*)(?:\/(files|messages|quotes|accept-quote)(?:\/([1-9]\d*))?)?$/);
+export function orderWorkspace({ payments, db, req, res, path, body, user, surface, send, fail, value, audit }) {
+  const match = path.match(/^\/api\/orders\/([1-9]\d*)(?:\/(files|messages|quotes|accept-quote|deliver|approve-delivery|request-revision)(?:\/([1-9]\d*))?)?$/);
   if (!match) return false;
   // Admin oversight does not grant routine access to customer documents or conversations.
   if (surface === 'admin') fail('Order workspace not found.', 404);
@@ -20,7 +21,7 @@ export function orderWorkspace({ db, req, res, path, body, user, surface, send, 
   if (!order || (surface === 'customer' ? order.customer_id !== user.id : order.owner_id !== user.id)) fail('Order workspace not found.', 404);
   const action = match[2], fileId = match[3] && Number(match[3]);
   if (req.method === 'GET' && !action) {
-    send({ order, files: db.prepare('SELECT id,name,type,length(bytes) AS size,created FROM order_files WHERE order_id=? ORDER BY id').all(id), messages: db.prepare('SELECT order_messages.id,message,created,users.role AS author FROM order_messages JOIN users ON users.id=sender WHERE order_id=? ORDER BY order_messages.id').all(id), quotes: db.prepare('SELECT * FROM quotes WHERE order_id=? ORDER BY id DESC').all(id) });
+    send({ order, participant_id:user.id, payment:payments.summary(id), deliveries:db.prepare('SELECT deliveries.*,order_files.name FROM deliveries JOIN order_files ON order_files.id=deliveries.file_id WHERE deliveries.order_id=? ORDER BY deliveries.id DESC').all(id), files: db.prepare('SELECT id,name,type,uploader,length(bytes) AS size,created FROM order_files WHERE order_id=? ORDER BY id').all(id), messages: db.prepare('SELECT order_messages.id,message,created,users.role AS author FROM order_messages JOIN users ON users.id=sender WHERE order_id=? ORDER BY order_messages.id').all(id), quotes: db.prepare('SELECT * FROM quotes WHERE order_id=? ORDER BY id DESC').all(id) });
     return true;
   }
   if (req.method === 'GET' && action === 'files' && fileId) {
@@ -33,6 +34,7 @@ export function orderWorkspace({ db, req, res, path, body, user, surface, send, 
   }
   if (req.method !== 'POST' || fileId) fail('Not found', 404);
   if (order.cafe_status !== 'approved') fail('This café is currently unavailable. Order changes are paused.', 403);
+  if (fulfilment({db,action,body,surface,user,order,fail,value,audit,send})) return true;
   if (action === 'messages') {
     if (db.prepare('SELECT count(*) AS n FROM order_messages WHERE order_id=?').get(id).n >= 500) fail('Message limit reached.', 409);
     db.prepare('INSERT INTO order_messages(order_id,sender,message) VALUES(?,?,?)').run(id, user.id, value(body.message, 3000));
@@ -58,12 +60,12 @@ export function orderWorkspace({ db, req, res, path, body, user, surface, send, 
     send({id:Number(result.lastInsertRowid)},201); return true;
   }
   if (action === 'quotes' && surface === 'cafe') {
-    if (order.status === 'awaiting_payment') fail('The quote has already been accepted.',409);
+    if (!['requested','quoted'].includes(order.status)) fail('The quote has already been accepted.',409);
     if (!Number.isSafeInteger(body.amount) || body.amount < 1 || body.amount > 10000000) fail('Enter a valid whole-shilling quote.');
     const scope=value(body.scope,3000), turnaround=value(body.turnaround,200);
     db.exec('BEGIN IMMEDIATE');
     try {
-      if (db.prepare('SELECT status FROM orders WHERE id=?').get(id).status === 'awaiting_payment') fail('The quote has already been accepted.',409);
+      if (!['requested','quoted'].includes(db.prepare('SELECT status FROM orders WHERE id=?').get(id).status)) fail('The quote has already been accepted.',409);
       db.prepare("UPDATE quotes SET status='superseded' WHERE order_id=? AND status='pending'").run(id);
       const result=db.prepare('INSERT INTO quotes(order_id,amount,scope,turnaround) VALUES(?,?,?,?)').run(id,body.amount,scope,turnaround);
       db.prepare("UPDATE orders SET status='quoted' WHERE id=?").run(id);

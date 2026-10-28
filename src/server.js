@@ -1,13 +1,17 @@
 import http from 'node:http';
+import { receiptDownload } from './receipts.js';
+import { createMpesa } from './mpesa.js';
+import { initializePayments, createPayments } from './payments.js';
+import { initializeFulfilment } from './fulfilment.js';
 import { initializeWorkspace, orderWorkspace, MAX_FILE_BYTES } from './order-workspace.js';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-export function createPlatform({ database = ':memory:' } = {}) {
+export function createPlatform({ database = ':memory:', paymentProvider = null, paymentClock = Date.now } = {}) {
   const db = new DatabaseSync(database);
-  db.exec(`PRAGMA foreign_keys=ON;
+  db.exec(`PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
     CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,email TEXT UNIQUE NOT NULL,password TEXT NOT NULL,role TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_id INTEGER REFERENCES users(id),expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS cafes(id INTEGER PRIMARY KEY,owner_id INTEGER UNIQUE REFERENCES users(id),name TEXT NOT NULL,location TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending');
@@ -15,6 +19,9 @@ export function createPlatform({ database = ':memory:' } = {}) {
     CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY,customer_id INTEGER REFERENCES users(id),cafe_id INTEGER REFERENCES cafes(id),service_id INTEGER REFERENCES services(id),instructions TEXT NOT NULL,price INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'requested',created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,actor INTEGER REFERENCES users(id),action TEXT NOT NULL,target INTEGER,created TEXT DEFAULT CURRENT_TIMESTAMP);`);
   initializeWorkspace(db);
+  initializePayments(db);
+  initializeFulfilment(db);
+  const payments=createPayments(db,paymentProvider,paymentClock);
   const hash = password => { const salt = randomBytes(16).toString('hex'); return salt + ':' + scryptSync(password, salt, 64).toString('hex'); };
   const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
   const value = (v, max = 200) => { if (typeof v !== 'string' || !v.trim() || v.trim().length > max) fail('Please check the required fields.'); return v.trim(); };
@@ -42,7 +49,7 @@ export function createPlatform({ database = ':memory:' } = {}) {
         const path = new URL(req.url, 'http://localhost').pathname;
         if (!path.startsWith('/api/')) {
           if (req.method !== 'GET') fail('Method not allowed', 405);
-          const assets = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'] };
+          const assets = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/receipt-printer.js': ['receipt-printer.js','text/javascript'], '/style.css': ['style.css', 'text/css'] };
           if (!assets[path]) fail('Not found', 404);
           let body = readFileSync(new URL('../public/' + assets[path][0], import.meta.url), 'utf8').replaceAll('__SURFACE__', surface);
           res.writeHead(200, { 'Content-Type': assets[path][1] }); return res.end(body);
@@ -51,7 +58,7 @@ export function createPlatform({ database = ':memory:' } = {}) {
         if (req.method === 'POST') {
           // JSON-only mutations and same-origin requests prevent cross-site form submissions.
           if (!req.headers['content-type']?.startsWith('application/json')) fail('JSON required', 415);
-          if (req.headers.origin && req.headers.origin !== `${process.env.SECURE_COOKIES === '1' ? 'https' : 'http'}://${req.headers.host}`) fail('Invalid origin', 403);
+          if (!/^\/api\/payments\/mpesa\/callback\/[a-f0-9-]{36}$/.test(path) && req.headers.origin && req.headers.origin !== `${process.env.SECURE_COOKIES === '1' ? 'https' : 'http'}://${req.headers.host}`) fail('Invalid origin', 403);
           const chunks = []; let size = 0;
           for await (const chunk of req) { size += chunk.length; if (size > ( /^\/api\/orders\/[1-9]\d*\/files$/.test(path) ? Math.ceil(MAX_FILE_BYTES * 4 / 3) + 2000 : 20000)) fail('Request too large', 413); chunks.push(chunk); }
           try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch { fail('Invalid JSON'); }
@@ -62,6 +69,7 @@ export function createPlatform({ database = ':memory:' } = {}) {
         const user = token && db.prepare('SELECT users.id,email,role FROM sessions JOIN users ON users.id=sessions.user_id WHERE token=? AND expires>?').get(token, Date.now());
         const role = surface === 'cafe' ? 'cafe' : surface;
         const cookie = t => `${cookieName}=${t}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${t ? 28800 : 0}${process.env.SECURE_COOKIES === '1' ? '; Secure' : ''}`;
+        if (path.startsWith('/api/payments/mpesa/callback/')) {if (!await payments.route({path,req,body,surface,user,fail,send})) fail('Not found',404);return;}
         if (path === '/api/session' && req.method === 'GET') return send({ surface, user: user?.role === role ? user : null });
         if (path === '/api/register' && req.method === 'POST') {
           if (surface === 'admin') fail('Admin accounts are provisioned by the operator.', 403);
@@ -115,7 +123,9 @@ export function createPlatform({ database = ':memory:' } = {}) {
           const result = db.prepare('INSERT INTO orders(customer_id,cafe_id,service_id,instructions,price) VALUES(?,?,?,?,?)').run(user.id, service.cafe_id, service.id, value(body.instructions, 5000), service.price);
           return send({ id: Number(result.lastInsertRowid) }, 201);
         }
-        if (orderWorkspace({ db, req, res, path, body, user, surface, send, fail, value, audit })) return;
+        if (receiptDownload({db,path,req,res,user,surface,fail})) return;
+        if (await payments.route({path,req,body,surface,user,fail,send})) return;
+        if (orderWorkspace({ payments, db, req, res, path, body, user, surface, send, fail, value, audit })) return;
         // Payment-dependent transitions deliberately remain disabled until verified payment integration.
         fail('Not found', 404);
       } catch (e) { if (!e.status) console.error(e); send({ error: e.status ? e.message : 'Something went wrong. Please retry.' }, e.status || 500); }
@@ -125,7 +135,7 @@ export function createPlatform({ database = ':memory:' } = {}) {
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   mkdirSync('data', { recursive: true });
-  const app = createPlatform({ database: process.env.DATABASE_PATH || 'data/izi.sqlite' });
+  const app = createPlatform({ database: process.env.DATABASE_PATH || 'data/izi.sqlite', paymentProvider:createMpesa() });
   if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) app.provisionAdmin(process.env.ADMIN_EMAIL, process.env.ADMIN_PASSWORD);
   const selected = process.env.SURFACE;
   for (const [surface, port] of [['customer', 3000], ['cafe', 3001], ['admin', 3002]]) {
