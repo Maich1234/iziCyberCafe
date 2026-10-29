@@ -58,7 +58,21 @@ function request(service) {
   const dialog=document.createElement('dialog');dialog.innerHTML=`<form id="requestform"><p class="eyebrow">NEW REQUEST</p><h2>${escape(service.name)}</h2><p>${money(service.price)} · The café will confirm scope and price before payment.</p><label>Tell the café what you need<textarea name="instructions" required maxlength="5000" rows="5" placeholder="Describe the work and your preferred turnaround time. You can attach documents after sending. Do not include passwords or OTPs."></textarea></label><div class="actions"><button type="button" id="cancel">Cancel</button><button class="primary">Send request ↗</button></div></form>`; document.body.append(dialog);dialog.showModal(); dialog.addEventListener('close',()=>dialog.remove());document.querySelector('#cancel').onclick=()=>dialog.close();bindForm('#requestform',async d=>{const created=await api('orders',{...d,service_id:service.id});dialog.close();await render();await openOrder(created.id);message('Request sent. You can now attach documents.');});
 }
 document.querySelector('#signout').onclick=async()=>{try{await api('logout',{});await render();}catch(e){message(e.message);}};
-render().catch(e=>{auth();message('This workspace is temporarily unavailable. Please try again shortly.');const form=document.querySelector('#authform');if(form)form.querySelectorAll('input,button').forEach(el=>el.disabled=true);document.querySelector('#toggle')?.remove();});
+async function boot(){
+  try{await render();}
+  catch{
+    auth();
+    const panel=app.querySelector('.panel'),form=panel.querySelector('#authform');
+    form.querySelectorAll('input,button').forEach(el=>el.disabled=true);
+    document.querySelector('#toggle')?.remove();
+    const status=document.createElement('div');status.className='service-status';status.setAttribute('role','status');
+    const text=document.createElement('p');text.textContent='This workspace is temporarily unavailable. Please try again shortly.';
+    const retry=document.createElement('button');retry.type='button';retry.textContent='Check connection again';
+    retry.onclick=async()=>{retry.disabled=true;retry.textContent='Checking connection…';await boot();};
+    status.append(text,retry);panel.prepend(status);message('');
+  }
+}
+boot();
 
 app.addEventListener('click', e => {
   const button=e.target.closest('[data-order]');
