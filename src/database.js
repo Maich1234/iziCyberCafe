@@ -1,8 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { DatabaseSync } from 'node:sqlite';
 import pg from 'pg';
-const tables=['users','sessions','cafes','services','orders','audit','order_files','order_messages','quotes','payment_attempts','payments','deliveries','print_options','printers','print_jobs','reviews','ops_alerts','reconciliation_notes','admin_recovery','auth_limits'];
-const serialTables=new Set(tables.filter(t=>!['sessions','payment_attempts','print_options','admin_recovery','auth_limits'].includes(t)));
+const tables=['users','sessions','cafes','services','orders','audit','order_files','order_messages','quotes','payment_attempts','payments','deliveries','print_options','printers','print_jobs','reviews','ops_alerts','reconciliation_notes','admin_recovery','auth_limits','maintenance_jobs'];
+const serialTables=new Set(tables.filter(t=>!['sessions','payment_attempts','print_options','admin_recovery','auth_limits','maintenance_jobs'].includes(t)));
 
 export function postgresSQL(input) {
   let index=0,quoted=false,sql='';

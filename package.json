@@ -6,8 +6,9 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test",
-    "check": "find src public api agent fixtures -name '*.js' -print0 | xargs -0 -n1 node --check",
-    "print-agent": "node agent/print-agent.js"
+    "check": "node --check vercel.js && find src public api agent fixtures scripts -name '*.js' -print0 | xargs -0 -n1 node --check",
+    "print-agent": "node agent/print-agent.js",
+    "readiness": "node scripts/readiness.js"
   },
   "engines": {
     "node": "24.x"

@@ -1,3 +1,4 @@
+import { initializeMaintenance, maintenanceRoute } from './maintenance.js';
 import { initializeEnhancements } from './enhancements-schema.js';
 import { catalog, availability, marketplaceRoutes } from './marketplace.js';
 import { operationsRoutes, recoveryRoutes, limitAuth } from './operations.js';
@@ -14,7 +15,7 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-export async function createPlatform({ database = ':memory:', paymentProvider = null, paymentClock = Date.now } = {}) {
+export async function createPlatform({ database = ':memory:', paymentProvider = null, paymentClock = Date.now, maintenanceSecret = process.env.CRON_SECRET } = {}) {
   const db = await createDatabase(database);
   if(db.dialect==='sqlite'){
   (await db.exec(`PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
@@ -29,6 +30,7 @@ export async function createPlatform({ database = ':memory:', paymentProvider = 
   (await initializeFulfilment(db));
   (await initializePrinting(db));
   await initializeEnhancements(db);
+  await initializeMaintenance(db);
   }
   const payments=(await createPayments(db,paymentProvider,paymentClock));
   const hash = password => { const salt = randomBytes(16).toString('hex'); return salt + ':' + scryptSync(password, salt, 64).toString('hex'); };
@@ -56,6 +58,8 @@ export async function createPlatform({ database = ':memory:', paymentProvider = 
       try {
         const path = new URL(req.url, 'http://localhost').pathname;
         if(serveAssets(req,res,surface))return;
+        if(await maintenanceRoute({db,payments,path,req,res,surface,secret:maintenanceSecret}))return;
+        if(path==='/api/health'&&req.method==='GET'){try{await db.prepare('SELECT id FROM users LIMIT 1').get();}catch{fail('The service is temporarily unavailable.',503);}return send({ok:true,surface});}
         let body = {};
         if (req.method === 'POST') {
           // JSON-only mutations and same-origin requests prevent cross-site form submissions.

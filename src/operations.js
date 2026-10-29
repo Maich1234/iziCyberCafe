@@ -1,3 +1,4 @@
+import { refreshPrintAlerts, runMaintenance } from './maintenance.js';
 import { randomBytes,createHash,timingSafeEqual,scryptSync } from 'node:crypto';
 const digest=v=>createHash('sha256').update(v).digest('hex');
 export const hashPassword=password=>{const salt=randomBytes(16).toString('hex');return salt+':'+scryptSync(password,salt,64).toString('hex');};
@@ -40,17 +41,16 @@ export async function recoveryRoutes({db,path,req,body,surface,user,fail,send,au
   }catch(e){await db.exec('ROLLBACK');throw e;}return true;
 }
 export async function operationsRoutes({db,path,req,body,surface,user,fail,value,send,audit,payments}){
-  if(!['/api/operations','/api/payments/reconcile','/api/payments/reconciliation-note','/api/refunds/record'].includes(path))return false;
+  if(!['/api/operations','/api/payments/reconcile','/api/payments/reconciliation-note','/api/refunds/record','/api/operations/run'].includes(path))return false;
   if(!user||!['admin','cafe'].includes(surface)||user.role!==surface)fail('Not found',404);
   if(path==='/api/operations'&&req.method==='GET'){
-    const stale=await db.prepare("SELECT id,cafe_id,order_id,status FROM print_jobs WHERE status='uncertain' OR (status='claimed' AND updated_at<?)").all(Date.now()-600000);
-    for(const job of stale)await db.prepare("INSERT OR IGNORE INTO ops_alerts(alert_key,cafe_id,order_id,kind,message) VALUES(?,?,?,'print','Print submission needs staff reconciliation. Check the printer before any retry.')").run('print:'+job.id,job.cafe_id,job.order_id);
-    await db.prepare("UPDATE ops_alerts SET status='resolved' WHERE kind='print' AND order_id IN (SELECT order_id FROM print_jobs WHERE status IN ('ready','collected'))").run();
-    if(surface==='admin')send({alerts:await db.prepare("SELECT * FROM ops_alerts ORDER BY id DESC LIMIT 100").all(),audit:await db.prepare('SELECT audit.*,users.email AS actor_email FROM audit LEFT JOIN users ON users.id=audit.actor ORDER BY audit.id DESC LIMIT 200').all(),refunds:await db.prepare("SELECT id,cafe_id,price,refund_state FROM orders WHERE refund_state<>'none' ORDER BY id DESC LIMIT 100").all()});
+    await refreshPrintAlerts(db);
+    if(surface==='admin')send({maintenance:await db.prepare('SELECT name,lease_until,last_started,last_finished,status,details FROM maintenance_jobs ORDER BY name').all(),alerts:await db.prepare("SELECT * FROM ops_alerts ORDER BY id DESC LIMIT 100").all(),audit:await db.prepare('SELECT audit.*,users.email AS actor_email FROM audit LEFT JOIN users ON users.id=audit.actor ORDER BY audit.id DESC LIMIT 200').all(),refunds:await db.prepare("SELECT id,cafe_id,price,refund_state FROM orders WHERE refund_state<>'none' ORDER BY id DESC LIMIT 100").all()});
     else {const cafe=await db.prepare('SELECT id FROM cafes WHERE owner_id=?').get(user.id);send({alerts:await db.prepare('SELECT * FROM ops_alerts WHERE cafe_id=? ORDER BY id DESC LIMIT 100').all(cafe.id),audit:await db.prepare("SELECT audit.id,action,target,created FROM audit WHERE (action LIKE 'order.%' AND target IN (SELECT id FROM orders WHERE cafe_id=?)) OR actor=? ORDER BY audit.id DESC LIMIT 100").all(cafe.id,user.id)});}
     return true;
   }
   if(surface!=='admin'||req.method!=='POST')fail('Not found',404);
+  if(path==='/api/operations/run'){send(await runMaintenance(db,payments,{actor:user.id}));return true;}
   if(path==='/api/payments/reconcile'){
     const result=await payments.reconcileBatch();await audit(user.id,'payments.reconciliation_checked',null);send(result);return true;
   }

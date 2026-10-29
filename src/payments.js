@@ -11,33 +11,33 @@ export async function createPayments(db, provider, clock = Date.now) {
   if (provider && (await db.prepare('SELECT id FROM payment_attempts WHERE environment<>? LIMIT 1').get(provider.environment))) throw Error('Use separate databases for sandbox and live payments.');
   const checking=new Map();
   async function reconcile(id) {
-    if (!provider) return;
+    if (!provider) return false;
     if (checking.has(id)) return checking.get(id);
     const check=(async()=>{
       const attempt=(await db.prepare('SELECT * FROM payment_attempts WHERE id=?').get(id));
-      if (!attempt || !attempt.checkout || !['pending','review'].includes(attempt.status) || attempt.environment!==provider.environment) return;
+      if (!attempt || !attempt.checkout || !['pending','review'].includes(attempt.status) || attempt.environment!==provider.environment) return false;
       // Persist throttling across processes. A failure to reach the provider never marks an order paid.
       const claim=(await db.prepare('UPDATE payment_attempts SET last_checked=? WHERE id=? AND last_checked<?').run(clock(),id,clock()-10000));
-      if (!claim.changes) return;
-      let result;try {result=await provider.query(attempt);} catch {return;}
-      if (!['paid','failed'].includes(result)) return;
+      if (!claim.changes) return false;
+      let result;try {result=await provider.query(attempt);} catch {return true;}
+      if (!['paid','failed'].includes(result)) return true;
       (await db.exec('BEGIN IMMEDIATE'));
       try {
         const current=(await db.prepare('SELECT * FROM payment_attempts WHERE id=?').get(id));
-        if (!['pending','review'].includes(current.status)) {(await db.exec('COMMIT'));return;}
+        if (!['pending','review'].includes(current.status)) {(await db.exec('COMMIT'));return true;}
         if (result==='failed') (await db.prepare("UPDATE payment_attempts SET status='failed' WHERE id=?").run(id));
         else {
           const order=(await db.prepare('SELECT * FROM orders WHERE id=?').get(attempt.order_id));
-          if (order.status!=='awaiting_payment' || order.price!==attempt.amount) {(await db.prepare("UPDATE payment_attempts SET status='review' WHERE id=?").run(id));(await db.exec('COMMIT'));return;}
+          if (order.status!=='awaiting_payment' || order.price!==attempt.amount) {(await db.prepare("UPDATE payment_attempts SET status='review' WHERE id=?").run(id));(await db.exec('COMMIT'));return true;}
           (await db.prepare('INSERT INTO payments(order_id,attempt_id,amount,checkout,environment) VALUES(?,?,?,?,?)').run(order.id,id,attempt.amount,attempt.checkout,attempt.environment));
           (await db.prepare("UPDATE payment_attempts SET status='paid' WHERE id=?").run(id));
           (await db.prepare("UPDATE orders SET status='in_progress' WHERE id=?").run(order.id));
           if (order.fulfilment_mode==='print') (await enqueuePrint(db,order.id));
           (await db.prepare("INSERT INTO audit(actor,action,target) VALUES(?,'order.payment_verified',?)").run(order.customer_id,order.id));
         }
-        (await db.exec('COMMIT'));
+        (await db.exec('COMMIT'));return true;
       }catch(e){(await db.exec('ROLLBACK'));throw e;}
-    })();checking.set(id,check);try {await check;} finally {checking.delete(id);}
+    })();checking.set(id,check);try {return await check;} finally {checking.delete(id);}
   }
   async function route(ctx) {
     const {path,req,body,surface,user,fail,send}=ctx;
@@ -98,9 +98,17 @@ export async function createPayments(db, provider, clock = Date.now) {
   }
   async function reconcileBatch(){
     if(!provider)throw Object.assign(Error('M-Pesa is not configured.'),{status:503});
-    const attempts=await db.prepare("SELECT id,checkout FROM payment_attempts WHERE status IN ('pending','review') ORDER BY last_checked LIMIT 10").all();
-    for(const attempt of attempts)if(attempt.checkout)await reconcile(attempt.id);
-    return {checked:attempts.filter(a=>a.checkout).length,needs_reference:attempts.filter(a=>!a.checkout).length};
+    // Reference-less attempts must not fill the batch and starve checkable payments.
+    const needs=await db.prepare("SELECT count(*) AS n FROM payment_attempts WHERE status IN ('pending','review','initiating') AND checkout IS NULL").get();
+    const attempts=await db.prepare("SELECT id FROM payment_attempts WHERE status IN ('pending','review') AND checkout IS NOT NULL ORDER BY last_checked,id LIMIT 10").all();
+    const started=Date.now();let checked=0,visited=0;
+    for(const attempt of attempts){
+      // A Daraja request has bounded transport time; leave room in the 60s function.
+      if(Date.now()-started>25000)break;
+      if(await reconcile(attempt.id))checked++;
+      visited++;
+    }
+    return {enabled:true,checked,needs_reference:needs.n,deferred:attempts.length-visited};
   }
-  return {route,summary,reconcileBatch};
+  return {route,summary,reconcileBatch,enabled:!!provider};
 }
