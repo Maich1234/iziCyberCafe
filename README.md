@@ -38,7 +38,7 @@ npm run check
 - Server-owned pricing: request prices and café IDs are derived from the service.
 - Persistent SQLite records and tenant-filtered order queries.
 - Private per-order document downloads, participant-only messaging, and versioned quotes with customer acceptance.
-- PDF, PNG, JPG and UTF-8 TXT uploads (5 MB per file, 20 files per order). Files are stored as SQLite blobs outside the public asset directory. Download headers force attachment delivery.
+- PDF, PNG, JPG and UTF-8 TXT uploads (3 MB per file, 20 files per order). Files are stored as SQLite blobs outside the public asset directory. Download headers force attachment delivery.
 - Audit records for café approval, file uploads, quotes, verified payments and fulfilment.
 - Configurable Daraja STK adapter, payment attempt tracking, and versioned digital delivery with customer approval.
 
@@ -50,7 +50,13 @@ Next: run the configured Daraja sandbox acceptance flow and the physical CUPS pr
 
 ## Deployment boundary
 
-No public deployment or domain configuration is included. To run one interface per process, set `SURFACE=customer`, `SURFACE=cafe` or `SURFACE=admin` and optionally `PORT`. The processes must share the same SQLite file on one host; do not copy it across independent containers. For multi-host production, move the data layer to a managed database and coordinate transactions, sessions and throttling centrally.
+The Vercel entry point is `api/index.js`. Deploy three projects with `SURFACE=customer`, `SURFACE=cafe` and `SURFACE=admin`, sharing one server-only PostgreSQL `DATABASE_URL` and using `SECURE_COOKIES=1`. Vercel refuses an ephemeral SQLite fallback. `vercel.json` routes pages and API requests through the correct surface. Node 24 is required. Uploads are capped at 3 MB to fit Vercel's request limit after base64 encoding.
+
+Wabunifu project `nhvoltweyqvpbhnlyajf` contains the isolated `izicybercafe` schema. `db/schema.sql` and `db/runtime-role.sql` were applied on 28 October 2026; do not reapply them blindly. The dedicated `izicyber_runtime` role has application-table access through RLS policies, no DDL privileges, and starts with NOLOGIN. At provisioning, enable LOGIN with a generated unique password and save the connection URL only in encrypted Vercel environment variables. Use the exact transaction-pooler hostname from Supabase's Connect panel, port 6543 and a project-qualified custom-role username; do not construct a hostname from the region. The driver uses unnamed queries and verifies TLS certificates. Supabase public/anon/authenticated roles cannot access the application schema. Application sessions and tenant authorization remain enforced by the server.
+
+For the admin project's initial operator, set `ADMIN_EMAIL` and `ADMIN_PASSWORD` securely, sign in once, then remove the bootstrap password variable and redeploy. Public registration cannot create admins. M-Pesa remains disabled until a separate sandbox acceptance flow is completed. Deployment is still pending the exact pooler host and end-to-end managed-database validation. Login throttling currently uses per-instance memory and needs shared enforcement before public launch.
+
+For local development, omit `DATABASE_URL` to use SQLite. To run one interface per process, set `SURFACE` and optionally `PORT`; local processes must share the same SQLite file on one host.
 
 Use distinct HTTPS hostnames with a trusted reverse proxy, enable `SECURE_COOKIES=1`, and keep the app bound to loopback behind that proxy. The proxy must preserve the external Host and strip untrusted forwarded headers. Configure backups, credential recovery, central rate limiting and monitoring before a production launch. Separate URLs do not replace authorization. No real documents, customer data or credentials belong in this public repository.
 
