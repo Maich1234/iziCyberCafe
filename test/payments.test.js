@@ -1,3 +1,4 @@
+import { pdfBase64 } from '../fixtures/pdf.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -71,7 +72,7 @@ test('verified payment unlocks versioned delivery, revision and final customer a
   assert.equal((await f.call('customer','payments/mpesa/callback/invalid',{})).status,404);
   assert.equal((await f.start()).status,409);
   assert.equal((await f.call('cafe','orders/1/quotes',{amount:100,scope:'Changed',turnaround:'Tomorrow'})).status,409);
-  const doc=Buffer.from('%PDF-1.7\nfinal work').toString('base64');
+  const doc=await pdfBase64('final work');
   const upload=await f.call('cafe','orders/1/files',{name:'final.pdf',content:doc});
   const fileId=upload.data.id;
   assert.equal((await f.call('customer','orders/1/deliver',{file_id:fileId,note:'Done'})).status,403);

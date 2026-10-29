@@ -19,7 +19,7 @@ export async function fulfilment({db,action,body,surface,user,order,fail,value,a
       if (!file) fail('Select a document you uploaded to this order.');
       if ((await db.prepare('SELECT id FROM deliveries WHERE file_id=?').get(file.id))) fail('Upload a new document for this revision.',409);
       (await db.prepare('INSERT INTO deliveries(order_id,file_id,note) VALUES(?,?,?)').run(id,file.id,value(body.note,3000)));
-      (await db.prepare("UPDATE orders SET status='awaiting_review' WHERE id=?").run(id));
+      (await db.prepare("UPDATE orders SET status='awaiting_review',started_at=COALESCE(started_at,?) WHERE id=?").run(Date.now(),id));
       (await audit(user.id,'order.delivered',id));
     } else {
       if (surface!=='customer') fail('Only the customer can review a delivery.',403);

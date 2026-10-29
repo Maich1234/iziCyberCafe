@@ -9,8 +9,12 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 const execute=promisify(execFile);
 export function cupsArguments(printer,job,file) {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(printer) || !Number.isSafeInteger(job.copies) || job.copies<1 || job.copies>100 || !['A4','Letter'].includes(job.paper) || !['monochrome','color'].includes(job.color) || !['one-sided','two-sided-long-edge'].includes(job.sides)) throw Error('Invalid printer or job settings.');
-  return ['-d',printer,'-n',String(job.copies),'-o','media='+job.paper,'-o','sides='+job.sides,'-o','print-color-mode='+job.color,'-t','iziCyberCafe-'+job.id,file];
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(printer) || !Number.isSafeInteger(job.copies) || job.copies<1 || job.copies>100 || !['A4','Letter','A3','Legal'].includes(job.paper) || !['monochrome','color'].includes(job.color) || !['one-sided','two-sided-long-edge'].includes(job.sides)) throw Error('Invalid printer or job settings.');
+  const stock=job.paper_type||'plain';
+  if(!['plain','premium','photo'].includes(stock)||job.page_ranges&&!/^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$/.test(job.page_ranges))throw Error('Invalid paper type or page ranges.');
+  const extra=job.page_ranges?['-o','page-ranges='+job.page_ranges]:[];
+  if(stock!=='plain')extra.push('-o','media-type='+({premium:'stationery-heavyweight',photo:'photographic'}[stock]));
+  return ['-d',printer,'-n',String(job.copies),'-o','media='+job.paper,'-o','sides='+job.sides,'-o','print-color-mode='+job.color,...extra,'-t','iziCyberCafe-'+job.id,file];
 }
 export async function runOnce(config, {request=fetch, submit=async(args)=>execute('lp',args,{timeout:60000,env:{...process.env,LC_ALL:'C'}})}={}) {
   if(config.PRINT_ENABLE!=='1') throw Error('Set PRINT_ENABLE=1 on the shop computer to allow printing.');

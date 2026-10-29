@@ -1,3 +1,4 @@
+import { countPages } from './pricing.js';
 import { printSummary, printOrderAction, requirePrintOptions } from './printing.js';
 import { Buffer } from 'node:buffer';
 import { fulfilment } from './fulfilment.js';
@@ -22,7 +23,7 @@ export async function orderWorkspace({ payments, db, req, res, path, body, user,
   if (!order || (surface === 'customer' ? order.customer_id !== user.id : order.owner_id !== user.id)) fail('Order workspace not found.', 404);
   const action = match[2], fileId = match[3] && Number(match[3]);
   if (req.method === 'GET' && !action) {
-    send({ order, printing:(await printSummary(db,id)), participant_id:user.id, payment:(await payments.summary(id)), deliveries:(await db.prepare('SELECT deliveries.*,order_files.name FROM deliveries JOIN order_files ON order_files.id=deliveries.file_id WHERE deliveries.order_id=? ORDER BY deliveries.id DESC').all(id)), files: (await db.prepare('SELECT id,name,type,uploader,length(bytes) AS size,created FROM order_files WHERE order_id=? ORDER BY id').all(id)), messages: (await db.prepare('SELECT order_messages.id,message,created,users.role AS author FROM order_messages JOIN users ON users.id=sender WHERE order_id=? ORDER BY order_messages.id').all(id)), quotes: (await db.prepare('SELECT * FROM quotes WHERE order_id=? ORDER BY id DESC').all(id)) });
+    send({ order, printing:(await printSummary(db,id)), participant_id:user.id, payment:(await payments.summary(id)), deliveries:(await db.prepare('SELECT deliveries.*,order_files.name FROM deliveries JOIN order_files ON order_files.id=deliveries.file_id WHERE deliveries.order_id=? ORDER BY deliveries.id DESC').all(id)), review:await db.prepare('SELECT rating,comment FROM reviews WHERE order_id=?').get(id)||null, files: (await db.prepare('SELECT id,name,type,uploader,page_count,length(bytes) AS size,created FROM order_files WHERE order_id=? ORDER BY id').all(id)), messages: (await db.prepare('SELECT order_messages.id,message,created,users.role AS author FROM order_messages JOIN users ON users.id=sender WHERE order_id=? ORDER BY order_messages.id').all(id)), quotes: (await db.prepare('SELECT * FROM quotes WHERE order_id=? ORDER BY id DESC').all(id)) });
     return true;
   }
   if (req.method === 'GET' && action === 'files' && fileId) {
@@ -34,6 +35,7 @@ export async function orderWorkspace({ payments, db, req, res, path, body, user,
     return true;
   }
   if (req.method !== 'POST' || fileId) fail('Not found', 404);
+  if(order.status==='cancelled' && action!=='messages')fail('This order is cancelled.',409);
   if (order.cafe_status !== 'approved') fail('This café is currently unavailable. Order changes are paused.', 403);
   if ((await printOrderAction({db,action,body,surface,user,order,fail,send}))) return true;
   if ((await fulfilment({db,action,body,surface,user,order,fail,value,audit,send}))) return true;
@@ -55,9 +57,11 @@ export async function orderWorkspace({ payments, db, req, res, path, body, user,
     const types = {pdf:'application/pdf',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',txt:'text/plain'};
     const valid = ext === 'pdf' ? bytes.subarray(0,5).toString() === '%PDF-' : ext === 'png' ? bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])) : ['jpg','jpeg'].includes(ext) ? bytes[0]===255 && bytes[1]===216 && bytes[2]===255 : ext === 'txt' ? !bytes.includes(0) && Buffer.from(bytes.toString('utf8')).equals(bytes) : false;
     if (!valid || !types[ext]) fail('Upload a PDF, PNG, JPG or UTF-8 TXT file with a matching format.');
+    const pages=ext==='pdf'?await countPages(bytes):null;
     const used = (await db.prepare('SELECT count(*) AS n FROM order_files WHERE order_id=?').get(id)).n;
     if (used >= 20) fail('This order has reached its 20-file limit.', 409);
-    const result = (await db.prepare('INSERT INTO order_files(order_id,uploader,name,type,bytes) VALUES(?,?,?,?,?)').run(id,user.id,name,types[ext],bytes));
+    const result = (await db.prepare('INSERT INTO order_files(order_id,uploader,name,type,bytes,page_count) VALUES(?,?,?,?,?,?)').run(id,user.id,name,types[ext],bytes,pages));
+    if(surface==='cafe'&&['in_progress','revision_requested'].includes(order.status))await db.prepare('UPDATE orders SET started_at=COALESCE(started_at,?) WHERE id=?').run(Date.now(),id);
     (await audit(user.id, 'order.file_uploaded', id));
     send({id:Number(result.lastInsertRowid)},201); return true;
   }
@@ -70,7 +74,10 @@ export async function orderWorkspace({ payments, db, req, res, path, body, user,
       if (!['requested','quoted'].includes((await db.prepare('SELECT status FROM orders WHERE id=?').get(id)).status)) fail('The quote has already been accepted.',409);
       (await requirePrintOptions(db,order,fail));
       (await db.prepare("UPDATE quotes SET status='superseded' WHERE order_id=? AND status='pending'").run(id));
-      const result=(await db.prepare('INSERT INTO quotes(order_id,amount,scope,turnaround) VALUES(?,?,?,?)').run(id,body.amount,scope,turnaround));
+      const options=await db.prepare('SELECT estimate FROM print_options WHERE order_id=?').get(id);
+      const breakdown=options?.estimate||'';
+      if(breakdown && JSON.parse(breakdown).total!==body.amount)fail('The quote must match the saved itemised print total. Update the service prices before the customer saves settings if needed.',409);
+      const result=(await db.prepare('INSERT INTO quotes(order_id,amount,scope,turnaround,breakdown) VALUES(?,?,?,?,?)').run(id,body.amount,scope,turnaround,breakdown));
       (await db.prepare("UPDATE orders SET status='quoted' WHERE id=?").run(id));
       (await audit(user.id,'order.quoted',id)); (await db.exec('COMMIT'));
       send({id:Number(result.lastInsertRowid)},201);

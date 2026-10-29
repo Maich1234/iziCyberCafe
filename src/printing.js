@@ -1,3 +1,4 @@
+import { PAPERS, PAPER_TYPES, pageSelection, estimatePrint } from './pricing.js';
 import { randomBytes, createHash } from 'node:crypto';
 const digest = value => createHash('sha256').update(value).digest('hex');
 export const PRINT_MODES = ['digital','print','edit_and_print'];
@@ -17,7 +18,7 @@ export async function initializePrinting(db) {
 export async function requirePrintOptions(db,order,fail) {
   if (order.fulfilment_mode==='digital') return;
   const options=(await db.prepare('SELECT * FROM print_options WHERE order_id=?').get(order.id));
-  if (!options || (order.fulfilment_mode==='print' && !options.file_id)) fail('Choose print settings and a PDF before requesting a quote.',409);
+  if (!options || !options.page_count || !options.estimate || !options.file_id) fail('Choose print settings and a PDF before requesting a quote.',409);
 }
 // Called inside the payment/approval transaction, so payment and queuing cannot drift apart.
 export async function enqueuePrint(db,orderId,approvedFileId=null) {
@@ -27,30 +28,34 @@ export async function enqueuePrint(db,orderId,approvedFileId=null) {
   const options=(await db.prepare('SELECT * FROM print_options WHERE order_id=?').get(orderId));
   const fileId=order.fulfilment_mode==='print'?options?.file_id:approvedFileId;
   if (!payment || !options || !fileId) throw Error('Print eligibility is incomplete.');
-  const file=(await db.prepare("SELECT id FROM order_files WHERE id=? AND order_id=? AND type='application/pdf'").get(fileId,orderId));
+  const file=(await db.prepare("SELECT id,page_count FROM order_files WHERE id=? AND order_id=? AND type='application/pdf'").get(fileId,orderId));
   if (!file) throw Error('Only an approved order PDF may be printed.');
-  (await db.prepare('INSERT OR IGNORE INTO print_jobs(order_id,file_id,cafe_id,environment,copies,paper,color,sides) VALUES(?,?,?,?,?,?,?,?)').run(orderId,file.id,order.cafe_id,payment.environment,options.copies,options.paper,options.color,options.sides));
+  if(options.page_count && file.page_count!==options.page_count)throw Object.assign(Error('The final PDF must have the agreed page count. Ask the café for a corrected PDF before approval.'),{status:409});
+  (await db.prepare('INSERT OR IGNORE INTO print_jobs(order_id,file_id,cafe_id,environment,copies,paper,color,sides,page_ranges,paper_type,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(orderId,file.id,order.cafe_id,payment.environment,options.copies,options.paper,options.color,options.sides,options.page_ranges,options.paper_type,Date.now()));
   (await db.prepare("UPDATE orders SET status='print_queued' WHERE id=?").run(orderId));
 }
 export async function printSummary(db,id) {
-  return {options:(await db.prepare('SELECT * FROM print_options WHERE order_id=?').get(id))||null,job:(await db.prepare('SELECT id,status,copies,paper,color,sides,attempt,created FROM print_jobs WHERE order_id=?').get(id))||null};
+  return {options:(await db.prepare('SELECT * FROM print_options WHERE order_id=?').get(id))||null,job:(await db.prepare('SELECT id,status,copies,paper,color,sides,page_ranges,paper_type,attempt,created FROM print_jobs WHERE order_id=?').get(id))||null};
 }
 export async function printOrderAction(ctx) {
   const {db,action,body,surface,user,order,fail,send}=ctx;
   if (action!=='print-settings') return false;
   if (surface!=='customer' || order.fulfilment_mode==='digital') fail('Not found',404);
   if (order.status!=='requested') fail('Print settings are frozen when the café quotes this order.',409);
-  if (!Number.isSafeInteger(body.copies) || body.copies<1 || body.copies>100 || !['A4','Letter'].includes(body.paper) || !['monochrome','color'].includes(body.color) || !['one-sided','two-sided-long-edge'].includes(body.sides)) fail('Choose valid print settings.');
-  let fileId=null;
-  if (order.fulfilment_mode==='print') {
-    if (!Number.isSafeInteger(body.file_id)) fail('Select a PDF you uploaded.');
-    const file=(await db.prepare("SELECT id FROM order_files WHERE id=? AND order_id=? AND uploader=? AND type='application/pdf'").get(body.file_id,order.id,user.id));
-    if (!file) fail('Select a PDF you uploaded to this order.');fileId=file.id;
-  }
+  if (!Number.isSafeInteger(body.copies) || body.copies<1 || body.copies>100 || !PAPERS.includes(body.paper) || !['monochrome','color'].includes(body.color) || !['one-sided','two-sided-long-edge'].includes(body.sides)) fail('Choose valid print settings.');
+  const paperType=body.paper_type||'plain';
+  if(!PAPER_TYPES.includes(paperType))fail('Select a valid paper type.');
+  if(!Number.isSafeInteger(body.file_id))fail('Select a source PDF so its pages can be counted.');
+  const file=await db.prepare("SELECT id,page_count FROM order_files WHERE id=? AND order_id=? AND uploader=? AND type='application/pdf'").get(body.file_id,order.id,user.id);
+  if(!file)fail('Select a PDF you uploaded to this order.');
+  const selection=pageSelection(body.page_ranges,file.page_count),fileId=file.id;
+  const service=await db.prepare('SELECT price,rates FROM services WHERE id=?').get(order.service_id);
+  if(!service.rates)fail('The café must publish itemised print charges before print settings can be saved.',409);
+  const estimate=estimatePrint(service,{...body,selected_pages:selection.count,paper_type:paperType});
   (await db.exec('BEGIN IMMEDIATE'));
   try {
     if ((await db.prepare('SELECT status FROM orders WHERE id=?').get(order.id)).status!=='requested') fail('Print settings are frozen when the café quotes this order.',409);
-    (await db.prepare('INSERT INTO print_options(order_id,file_id,copies,paper,color,sides) VALUES(?,?,?,?,?,?) ON CONFLICT(order_id) DO UPDATE SET file_id=excluded.file_id,copies=excluded.copies,paper=excluded.paper,color=excluded.color,sides=excluded.sides').run(order.id,fileId,body.copies,body.paper,body.color,body.sides));
+    (await db.prepare('INSERT INTO print_options(order_id,file_id,copies,paper,color,sides,page_ranges,page_count,selected_pages,paper_type,estimate) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(order_id) DO UPDATE SET file_id=excluded.file_id,copies=excluded.copies,paper=excluded.paper,color=excluded.color,sides=excluded.sides,page_ranges=excluded.page_ranges,page_count=excluded.page_count,selected_pages=excluded.selected_pages,paper_type=excluded.paper_type,estimate=excluded.estimate').run(order.id,fileId,body.copies,body.paper,body.color,body.sides,selection.ranges,file.page_count,selection.count,paperType,estimate?JSON.stringify(estimate):''));
     (await db.exec('COMMIT'));
   }catch(e){(await db.exec('ROLLBACK'));throw e;}
   send({ok:true});return true;
@@ -59,13 +64,15 @@ export async function printerRoutes({db,path,req,body,surface,user,fail,value,se
   if (!path.startsWith('/api/printers') && !path.startsWith('/api/print-jobs')) return false;
   if (surface!=='cafe' || user?.role!=='cafe') fail('Not found',404);
   const cafe=(await db.prepare('SELECT * FROM cafes WHERE owner_id=?').get(user.id));
-  if (path==='/api/printers' && req.method==='GET') {send({printers:(await db.prepare('SELECT id,name,environment,enabled,color,duplex,last_seen FROM printers WHERE cafe_id=?').all(cafe.id)),jobs:(await db.prepare('SELECT id,order_id,status,environment,copies,paper,color,sides,attempt,spool_id,printer_id FROM print_jobs WHERE cafe_id=? ORDER BY id DESC').all(cafe.id))});return true;}
+  if (path==='/api/printers' && req.method==='GET') {send({printers:(await db.prepare('SELECT id,name,environment,enabled,color,duplex,papers,paper_types,last_seen FROM printers WHERE cafe_id=?').all(cafe.id)),jobs:(await db.prepare('SELECT id,order_id,status,environment,copies,paper,color,sides,page_ranges,paper_type,attempt,spool_id,printer_id FROM print_jobs WHERE cafe_id=? ORDER BY id DESC').all(cafe.id))});return true;}
   if (req.method!=='POST') fail('Not found',404);
   if (cafe.status!=='approved') fail('Your café must be approved.',403);
   if (path==='/api/printers') {
     if (!['sandbox','live'].includes(body.environment) || typeof body.color!=='boolean' || typeof body.duplex!=='boolean') fail('Choose valid printer capabilities.');
+    const papers=body.papers||['A4','Letter'],types=body.paper_types||['plain'];
+    if(!Array.isArray(papers)||!papers.length||papers.some(p=>!PAPERS.includes(p))||!Array.isArray(types)||!types.length||types.some(t=>!PAPER_TYPES.includes(t)))fail('Choose supported printer paper sizes and types.');
     const token=randomBytes(32).toString('hex');
-    const result=(await db.prepare('INSERT INTO printers(cafe_id,name,environment,token_hash,color,duplex) VALUES(?,?,?,?,?,?)').run(cafe.id,value(body.name),body.environment,digest(token),Number(body.color),Number(body.duplex)));
+    const result=(await db.prepare('INSERT INTO printers(cafe_id,name,environment,token_hash,color,duplex,papers,paper_types) VALUES(?,?,?,?,?,?,?,?)').run(cafe.id,value(body.name),body.environment,digest(token),Number(body.color),Number(body.duplex),JSON.stringify(papers),JSON.stringify(types)));
     (await audit(user.id,'printer.created',Number(result.lastInsertRowid)));send({id:Number(result.lastInsertRowid),token},201);return true;
   }
   const printerMatch=path.match(/^\/api\/printers\/([1-9]\d*)\/(pause|resume|rotate)$/);
@@ -109,12 +116,15 @@ export async function printAgentRoutes({db,path,req,res,body,surface,fail,send})
       const current=(await db.prepare('SELECT printers.enabled,cafes.status FROM printers JOIN cafes ON cafes.id=printers.cafe_id WHERE printers.id=?').get(printer.id));
       if(!current.enabled||current.status!=='approved'){(await db.exec('COMMIT'));send({job:null,paused:true});return true;}
       if((await db.prepare("SELECT id FROM print_jobs WHERE printer_id=? AND status='claimed'").get(printer.id))) {(await db.exec('COMMIT'));send({job:null,attention:true});return true;}
-      const job=(await db.prepare("SELECT * FROM print_jobs WHERE cafe_id=? AND environment=? AND status='queued' AND (color='monochrome' OR ?=1) AND (sides='one-sided' OR ?=1) ORDER BY id LIMIT 1").get(printer.cafe_id,printer.environment,printer.color,printer.duplex));
+      const candidates=await db.prepare("SELECT * FROM print_jobs WHERE cafe_id=? AND environment=? AND status='queued' AND (color='monochrome' OR ?=1) AND (sides='one-sided' OR ?=1) ORDER BY id LIMIT 100").all(printer.cafe_id,printer.environment,printer.color,printer.duplex);
+      const job=candidates.find(j=>JSON.parse(printer.papers).includes(j.paper)&&JSON.parse(printer.paper_types).includes(j.paper_type));
       if (!job) {(await db.exec('COMMIT'));send({job:null});return true;}
       const claim=randomBytes(24).toString('hex');
-      (await db.prepare("UPDATE print_jobs SET status='claimed',printer_id=?,claim_token=?,attempt=attempt+1 WHERE id=?").run(printer.id,claim,job.id));
+      (await db.prepare("UPDATE print_jobs SET status='claimed',printer_id=?,claim_token=?,attempt=attempt+1,updated_at=? WHERE id=?").run(printer.id,claim,Date.now(),job.id));
+      await db.prepare('UPDATE orders SET started_at=COALESCE(started_at,?) WHERE id=?').run(Date.now(),job.order_id);
+      await db.prepare("INSERT INTO audit(actor,action,target) VALUES(NULL,'order.print_claimed',?)").run(job.order_id);
       const file=(await db.prepare('SELECT bytes FROM order_files WHERE id=?').get(job.file_id));
-      (await db.exec('COMMIT'));send({job:{id:job.id,attempt:job.attempt+1,claim_token:claim,environment:job.environment,copies:job.copies,paper:job.paper,color:job.color,sides:job.sides,sha256:digest(file.bytes)}});
+      (await db.exec('COMMIT'));send({job:{id:job.id,attempt:job.attempt+1,claim_token:claim,environment:job.environment,copies:job.copies,paper:job.paper,color:job.color,sides:job.sides,page_ranges:job.page_ranges,paper_type:job.paper_type,sha256:digest(file.bytes)}});
     }catch(e){(await db.exec('ROLLBACK'));throw e;}return true;
   }
   const match=path.match(/^\/api\/print-agent\/jobs\/([1-9]\d*)\/(file|report)$/);
@@ -134,9 +144,11 @@ export async function printAgentRoutes({db,path,req,res,body,surface,fail,send})
     if (job.status!=='claimed') fail('This claim has already been resolved.',409);
     (await db.exec('BEGIN IMMEDIATE'));
     try {
-      const update=(await db.prepare("UPDATE print_jobs SET status=?,spool_id=? WHERE id=? AND claim_token=? AND status='claimed'").run(body.status,body.status==='spooled'?body.spool_id:null,job.id,claim));
+      const update=(await db.prepare("UPDATE print_jobs SET status=?,spool_id=?,updated_at=? WHERE id=? AND claim_token=? AND status='claimed'").run(body.status,body.status==='spooled'?body.spool_id:null,Date.now(),job.id,claim));
       if(!update.changes)fail('This claim has already been resolved.',409);
       (await db.prepare('UPDATE orders SET status=? WHERE id=?').run(body.status==='spooled'?'printing':'print_attention',job.order_id));
+      await db.prepare('INSERT INTO audit(actor,action,target) VALUES(NULL,?,?)').run('order.print_'+body.status,job.order_id);
+      if(body.status==='uncertain')await db.prepare("INSERT OR IGNORE INTO ops_alerts(alert_key,cafe_id,order_id,kind,message) VALUES(?,?,?,'print','Print submission failed or is uncertain. Check physical output before retrying.')").run('print:'+job.id,job.cafe_id,job.order_id);
       (await db.exec('COMMIT'));send({ok:true});
     }catch(e){(await db.exec('ROLLBACK'));throw e;}return true;
   }
