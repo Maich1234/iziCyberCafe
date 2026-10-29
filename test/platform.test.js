@@ -1,3 +1,4 @@
+import { pdfBase64 } from '../fixtures/pdf.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -44,7 +45,7 @@ test('registration, approval, catalog and tenant-isolated order flow', async t =
   assert.equal((await call('customer','dashboard',undefined,otherCustomer)).data.orders.length,0);
   assert.equal((await call('customer','cafes/review',{id:1,status:'approved'},customer)).status,404);
   await t.test('private documents and conversations', async () => {
-    const encoded=Buffer.from('%PDF-1.7\nexample document').toString('base64');
+    const encoded=await pdfBase64('example document');
     assert.equal((await call('customer','orders/1/files',{name:'cv.pdf',content:encoded},customer)).status,201);
     assert.equal((await call('customer','orders/1/files',{name:'fake.pdf',content:Buffer.from('not a PDF').toString('base64')},customer)).status,400);
     assert.equal((await call('customer','orders/1/files',{name:'../cv.pdf',content:encoded},customer)).status,400);

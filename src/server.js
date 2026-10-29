@@ -1,3 +1,7 @@
+import { initializeEnhancements } from './enhancements-schema.js';
+import { catalog, availability, marketplaceRoutes } from './marketplace.js';
+import { operationsRoutes, recoveryRoutes, limitAuth } from './operations.js';
+import { serveAssets } from './surface-assets.js';
 import http from 'node:http';
 import { initializePrinting, PRINT_MODES, printerRoutes, printAgentRoutes } from './printing.js';
 import { receiptDownload } from './receipts.js';
@@ -7,7 +11,7 @@ import { initializeFulfilment } from './fulfilment.js';
 import { initializeWorkspace, orderWorkspace, MAX_FILE_BYTES } from './order-workspace.js';
 import { createDatabase } from './database.js';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-import { readFileSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 export async function createPlatform({ database = ':memory:', paymentProvider = null, paymentClock = Date.now } = {}) {
@@ -24,6 +28,7 @@ export async function createPlatform({ database = ':memory:', paymentProvider = 
   (await initializePayments(db));
   (await initializeFulfilment(db));
   (await initializePrinting(db));
+  await initializeEnhancements(db);
   }
   const payments=(await createPayments(db,paymentProvider,paymentClock));
   const hash = password => { const salt = randomBytes(16).toString('hex'); return salt + ':' + scryptSync(password, salt, 64).toString('hex'); };
@@ -40,7 +45,6 @@ export async function createPlatform({ database = ':memory:', paymentProvider = 
     if (existing && existing.role !== 'admin') fail('Admin email already belongs to another role.');
     if (!existing) (await addUser(email, password, 'admin'));
   }
-  const loginAttempts = new Map();
   const audit = async (actor, action, target) => (await db.prepare('INSERT INTO audit(actor,action,target) VALUES(?,?,?)').run(actor, action, target));
   function handler(surface) {
     if (!['customer', 'cafe', 'admin'].includes(surface)) throw Error('Unknown surface');
@@ -51,13 +55,7 @@ export async function createPlatform({ database = ':memory:', paymentProvider = 
       res.setHeader('Referrer-Policy', 'no-referrer');
       try {
         const path = new URL(req.url, 'http://localhost').pathname;
-        if (!path.startsWith('/api/')) {
-          if (req.method !== 'GET') fail('Method not allowed', 405);
-          const assets = { '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/printing.js':['printing.js','text/javascript'], '/receipt-printer.js': ['receipt-printer.js','text/javascript'], '/style.css': ['style.css', 'text/css'] };
-          if (!assets[path]) fail('Not found', 404);
-          let body = readFileSync(new URL('../public/' + assets[path][0], import.meta.url), 'utf8').replaceAll('__SURFACE__', surface);
-          res.writeHead(200, { 'Content-Type': assets[path][1] }); return res.end(body);
-        }
+        if(serveAssets(req,res,surface))return;
         let body = {};
         if (req.method === 'POST') {
           // JSON-only mutations and same-origin requests prevent cross-site form submissions.
@@ -87,6 +85,7 @@ export async function createPlatform({ database = ':memory:', paymentProvider = 
         const cookie = t => `${cookieName}=${t}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${t ? 28800 : 0}${process.env.SECURE_COOKIES === '1' ? '; Secure' : ''}`;
         if ((await printAgentRoutes({db,path,req,res,body,surface,fail,send}))) return;
         if (path.startsWith('/api/payments/mpesa/callback/')) {if (!await payments.route({path,req,body,surface,user,fail,send})) fail('Not found',404);return;}
+        if(await recoveryRoutes({db,path,req,body,surface,user,fail,send,audit}))return;
         if (path === '/api/session' && req.method === 'GET') return send({ surface, user: user?.role === role ? user : null });
         if (path === '/api/register' && req.method === 'POST') {
           if (surface === 'admin') fail('Admin accounts are provisioned by the operator.', 403);
@@ -97,12 +96,7 @@ export async function createPlatform({ database = ':memory:', paymentProvider = 
           return send({ message: 'Account created. You can now sign in.' }, 201);
         }
         if (path === '/api/login' && req.method === 'POST') {
-          const key = surface + ':' + req.socket.remoteAddress;
-          const now = Date.now();
-          for (const [k, v] of loginAttempts) if (v.until < now) loginAttempts.delete(k);
-          const limit = loginAttempts.get(key) || { count: 0, until: now + 900000 };
-          if (++limit.count > 30) fail('Too many sign-in attempts. Retry in 15 minutes.', 429);
-          loginAttempts.set(key, limit);
+          await limitAuth(db,'login:'+surface+':'+String(body.email||'').trim().toLowerCase(),fail);
           const account = (await db.prepare('SELECT * FROM users WHERE email=? AND role=?').get(String(body.email || '').toLowerCase().trim(), role));
           const [salt, stored] = (account?.password || hash('dummy-password')).split(':');
           const attempt = scryptSync(String(body.password || '').slice(0, 200), salt, 64);
@@ -113,10 +107,11 @@ export async function createPlatform({ database = ':memory:', paymentProvider = 
           res.setHeader('Set-Cookie', cookie(next)); return send({ message: 'Signed in' });
         }
         if (path === '/api/logout' && req.method === 'POST') { (await db.prepare('DELETE FROM sessions WHERE token=?').run(token || '')); res.setHeader('Set-Cookie', cookie('')); return send({ ok: true }); }
-        if (path === '/api/catalog' && req.method === 'GET' && surface === 'customer') return send({ cafes: (await db.prepare("SELECT id,name,location FROM cafes WHERE status='approved'").all()), services: (await db.prepare("SELECT services.* FROM services JOIN cafes ON cafes.id=services.cafe_id WHERE cafes.status='approved'").all()) });
+        if(path==='/api/catalog'&&req.method==='GET'&&surface==='customer')return send(await catalog(db));
+        if(/^\/api\/cafes\/\d+\/profile$/.test(path)&&req.method==='GET'&&surface==='customer'){await marketplaceRoutes({db,path,req,body,surface,user,fail,value,send,audit});return;}
         if (!user || user.role !== role) fail('Please sign in to this workspace.', 401);
         if (path === '/api/dashboard' && req.method === 'GET') {
-          if (surface === 'admin') return send({ cafes: (await db.prepare('SELECT id,name,location,status FROM cafes').all()), orders: (await db.prepare('SELECT orders.*,cafes.name AS cafe FROM orders JOIN cafes ON cafes.id=orders.cafe_id ORDER BY orders.id DESC').all()) });
+          if (surface === 'admin') return send({ cafes: (await db.prepare('SELECT id,name,location,status,verified FROM cafes').all()), orders: (await db.prepare('SELECT orders.*,cafes.name AS cafe FROM orders JOIN cafes ON cafes.id=orders.cafe_id ORDER BY orders.id DESC').all()) });
           if (surface === 'cafe') {
             const cafe = (await db.prepare('SELECT * FROM cafes WHERE owner_id=?').get(user.id));
             return send({ cafe, services: (await db.prepare('SELECT * FROM services WHERE cafe_id=?').all(cafe.id)), orders: (await db.prepare('SELECT orders.*,services.name AS service FROM orders JOIN services ON services.id=orders.service_id WHERE orders.cafe_id=? ORDER BY orders.id DESC').all(cafe.id)) });
@@ -136,11 +131,14 @@ export async function createPlatform({ database = ':memory:', paymentProvider = 
           (await db.prepare('INSERT INTO services(cafe_id,name,price,fulfilment_mode) VALUES(?,?,?,?)').run(cafe.id, value(body.name), body.price,mode)); return send({ ok: true }, 201);
         }
         if (path === '/api/orders' && req.method === 'POST' && surface === 'customer') {
-          const service = (await db.prepare("SELECT services.* FROM services JOIN cafes ON cafes.id=services.cafe_id WHERE services.id=? AND cafes.status='approved'").get(body.service_id));
+          const service = (await db.prepare("SELECT services.*,cafes.hours,cafes.accepting FROM services JOIN cafes ON cafes.id=services.cafe_id WHERE services.id=? AND cafes.status='approved' AND services.available=1").get(body.service_id));
           if (!service) fail('Service is unavailable', 404);
+          if(!availability(service).open)fail('This café is not accepting new orders now. Check its opening hours.',409);
           const result = (await db.prepare('INSERT INTO orders(customer_id,cafe_id,service_id,instructions,price,fulfilment_mode) VALUES(?,?,?,?,?,?)').run(user.id, service.cafe_id, service.id, value(body.instructions, 5000), service.price,service.fulfilment_mode));
           return send({ id: Number(result.lastInsertRowid) }, 201);
         }
+        if(await marketplaceRoutes({db,path,req,body,surface,user,fail,value,send,audit}))return;
+        if(await operationsRoutes({db,path,req,body,surface,user,fail,value,send,audit,payments}))return;
         if ((await printerRoutes({db,path,req,body,surface,user,fail,value,send,audit}))) return;
         if ((await receiptDownload({db,path,req,res,user,surface,fail}))) return;
         if (await payments.route({path,req,body,surface,user,fail,send})) return;

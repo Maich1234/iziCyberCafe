@@ -1,3 +1,4 @@
+import { pdfBase64 } from '../fixtures/pdf.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -23,11 +24,12 @@ async function fixture(t,mode='print') {
   for(const role of ['cafe','customer','admin'])await call(role,'login',{email:role+'@example.test',password:'password-for-testing'});
   await call('admin','cafes/review',{id:1,status:'approved'});
   await call('cafe','services',{name:'Printing',price:100,fulfilment_mode:mode});
+  await call('cafe','services/1/settings',{available:true,eta_minutes:60,rates:{mono:0,colour_extra:0,duplex_extra:0,paper:{A4:{plain:0}}}});
   await call('customer','orders',{service_id:1,instructions:'Please prepare my document.'});
-  const upload=async(role,name='document.pdf')=>(await call(role,'orders/1/files',{name,content:Buffer.from('%PDF-1.7\nTest PDF '+name).toString('base64')})).data.id;
+  const upload=async(role,name='document.pdf')=>(await call(role,'orders/1/files',{name,content:await pdfBase64(name)})).data.id;
   const source=await upload('customer');
   const settings={file_id:source,copies:3,paper:'A4',color:'color',sides:'two-sided-long-edge'};
-  const quote=()=>call('cafe','orders/1/quotes',{amount:300,scope:'All pages, three colour duplex copies',turnaround:'Today after payment'});
+  const quote=()=>call('cafe','orders/1/quotes',{amount:100,scope:'All pages, three colour duplex copies',turnaround:'Today after payment'});
   async function pay() {await quote();await call('customer','orders/1/accept-quote',{quote_id:1});await call('customer','orders/1/payment',{phone:'0712345678'});return call('customer','orders/1/payment/check',{});}
   const detail=async()=>(await call('customer','orders/1')).data;
   const printer=async(extra={})=>(await call('cafe','printers',{name:'Front desk',environment:'sandbox',color:true,duplex:true,...extra})).data;
@@ -57,6 +59,7 @@ test('only paid PDF jobs are queued; agent claims are exclusive and collection f
   const index=claims.findIndex(c=>c.job),job=claims[index].job,token=index?second.token:p.token;
   assert.equal((await (await f.agent(token,'claim')).json()).attention,true);
   const file=await f.agent(token,`jobs/${job.id}/file`,undefined,job.claim_token);
+  assert.equal((await f.call('customer','orders/1/cancel',{reason:'Printer already claimed it'})).status,409);
   assert.equal(file.status,200);assert.match(await file.text(),/^%PDF-/);
   assert.equal((await f.agent(mono.token,`jobs/${job.id}/file`,undefined,job.claim_token)).status,404);
   assert.equal((await f.agent(token,`jobs/${job.id}/report`,{status:'spooled',spool_id:'Desk-1'},job.claim_token)).status,200);
@@ -89,7 +92,7 @@ test('editing orders wait for exact final PDF approval before queuing',async t=>
   const claim=(await (await f.agent(p.token,'claim')).json()).job;
   assert.ok(claim);
   const output=await f.agent(p.token,`jobs/${claim.id}/file`,undefined,claim.claim_token);
-  assert.match(await output.text(),/final.pdf/);
+  assert.match(await output.text(),/^%PDF-/);
 });
 test('uncertain spool outcomes require explicit reconciliation; stale claims cannot print a retry',async t=>{
   const f=await fixture(t);await f.call('customer','orders/1/print-settings',f.settings);await f.pay();const p=await f.printer();
@@ -98,6 +101,8 @@ test('uncertain spool outcomes require explicit reconciliation; stale claims can
   let submits=0;
   await assert.rejects(runOnce(config,{submit:async()=>{submits++;throw Error('spool timeout');}}),/timeout/);
   assert.equal(submits,1);assert.equal((await f.detail()).printing.job.status,'uncertain');
+  assert.equal((await f.call('cafe','operations')).data.alerts.filter(a=>a.status==='open').length,1);
+  assert.equal((await f.call('admin','operations')).data.alerts.filter(a=>a.status==='open').length,1);
   assert.equal((await runOnce(config,{submit:async()=>{throw Error('must not resubmit');}})).status,'idle');
   const job=(await f.detail()).printing.job;
   assert.equal((await f.call('cafe',`print-jobs/${job.id}/requeue`,{note:'Retry'})).status,409);
@@ -126,7 +131,7 @@ test('printer pause, credential rotation and tenant boundaries',async t=>{
 test('agent is opt-in and rejects command injection and unsupported settings',async()=>{
   await assert.rejects(runOnce({}),/PRINT_ENABLE/);
   assert.throws(()=>cupsArguments('Desk;touch hacked',{copies:1,paper:'A4',color:'color',sides:'one-sided'},'/tmp/doc.pdf'));
-  assert.throws(()=>cupsArguments('Desk',{copies:1,paper:'A3',color:'color',sides:'one-sided'},'/tmp/doc.pdf'));
+  assert.throws(()=>cupsArguments('Desk',{copies:1,paper:'A2',color:'color',sides:'one-sided'},'/tmp/doc.pdf'));
 });
 test('a lost spool report leaves the claim blocked instead of submitting again',async t=>{
   const f=await fixture(t);await f.call('customer','orders/1/print-settings',f.settings);await f.pay();const p=await f.printer();

@@ -43,7 +43,7 @@ export async function createPayments(db, provider, clock = Date.now) {
     const {path,req,body,surface,user,fail,send}=ctx;
     if (path==='/api/payments/review' && req.method==='GET') {
       if (!user || user.role!=='admin' || surface!=='admin') fail('Not found',404);
-      send({attempts:(await db.prepare("SELECT id,order_id,amount,environment,status,checkout,created,'••••' || substr(phone,-4) AS phone FROM payment_attempts ORDER BY rowid DESC LIMIT 100").all())});return true;
+      send({notes:await db.prepare('SELECT attempt_id,note,created FROM reconciliation_notes ORDER BY id DESC LIMIT 100').all(),attempts:(await db.prepare("SELECT id,order_id,amount,environment,status,checkout,created,'••••' || substr(phone,-4) AS phone FROM payment_attempts ORDER BY rowid DESC LIMIT 100").all())});return true;
     }
     const callback=path.match(/^\/api\/payments\/mpesa\/callback\/([a-f0-9-]{36})$/);
     if (callback) {
@@ -96,5 +96,11 @@ export async function createPayments(db, provider, clock = Date.now) {
     const payment=(await db.prepare('SELECT id,amount,environment,created FROM payments WHERE order_id=?').get(orderId));
     return {enabled:!!provider,environment:provider?.environment,attempt:attempt||null,verified:payment||null};
   }
-  return {route,summary};
+  async function reconcileBatch(){
+    if(!provider)throw Object.assign(Error('M-Pesa is not configured.'),{status:503});
+    const attempts=await db.prepare("SELECT id,checkout FROM payment_attempts WHERE status IN ('pending','review') ORDER BY last_checked LIMIT 10").all();
+    for(const attempt of attempts)if(attempt.checkout)await reconcile(attempt.id);
+    return {checked:attempts.filter(a=>a.checkout).length,needs_reference:attempts.filter(a=>!a.checkout).length};
+  }
+  return {route,summary,reconcileBatch};
 }

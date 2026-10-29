@@ -6,13 +6,14 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test",
-    "check": "node --check src/server.js && node --check src/order-workspace.js && node --check src/payments.js && node --check src/mpesa.js && node --check src/fulfilment.js && node --check public/app.js && node --check src/receipts.js && node --check public/receipt-printer.js && node --check src/printing.js && node --check agent/print-agent.js && node --check public/printing.js && node --check src/database.js && node --check api/index.js",
+    "check": "find src public api agent fixtures -name '*.js' -print0 | xargs -0 -n1 node --check",
     "print-agent": "node agent/print-agent.js"
   },
   "engines": {
     "node": "24.x"
   },
   "dependencies": {
+    "pdf-lib": "1.17.1",
     "pg": "8.23.1"
   }
 }
